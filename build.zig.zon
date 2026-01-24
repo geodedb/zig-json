@@ -1,0 +1,16 @@
+.{
+    .name = .json,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0xa36dc6a6ec0be83b,
+    .dependencies = .{
+        .uri = .{
+            .path = "../uri",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
