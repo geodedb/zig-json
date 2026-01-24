@@ -7,18 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Merge request template for contributions
-- Issue templates for bug reports, features, and questions
-
-### Changed
-- Updated CI catalog components to v1.7.1
-
-## [0.1.0] - 2026-01-23
+## [0.1.0] - 2026-01-24
 
 Initial public release under Apache-2.0 license.
 
 ### Added
+
+- Merge request template for contributions
+- Issue templates for bug reports, features, and questions
 
 #### Core Features
 - RFC 8259 compliant JSON parsing with proper error handling
@@ -91,6 +87,8 @@ Initial public release under Apache-2.0 license.
 ### Changed
 - Removed 'zig' prefix from library name for cleaner imports
 - Updated README to reflect correct library naming
+- Updated CI catalog components to v1.7.1
+- Updated uri dependency to use GitLab archive URL
 
 ## [0.0.1] - 2025-12-30
 

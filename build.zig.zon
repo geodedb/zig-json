@@ -1,16 +1,18 @@
 .{
     .name = .json,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .minimum_zig_version = "0.15.2",
-    .fingerprint = 0xa36dc6a6ec0be83b,
+    .fingerprint = 0x6b072545e19eebb4,
     .dependencies = .{
         .uri = .{
-            .path = "../uri",
+            .url = "https://gitlab.com/devnw/zig/uri/-/archive/v0.1.0/uri-v0.1.0.tar.gz",
+            .hash = "uri-0.1.0-zVvOsXZLAQAfg1wUuvR2yQC3FLtQPAV85R2aS6EFiaZn",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "LICENSE",
     },
 }
