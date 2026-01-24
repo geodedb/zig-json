@@ -4,6 +4,14 @@ A fully RFC 8259 compliant JSON library for Zig 0.15.2 with JSON Schema 2020-12 
 
 [![Build Status](https://gitlab.com/devnw/zig/json/badges/main/pipeline.svg)](https://gitlab.com/devnw/zig/json/-/pipelines)
 
+## Status
+
+| Aspect | Info |
+|--------|------|
+| API Stability | Beta |
+| Zig Version | 0.15.2+ |
+| Platforms | Linux, macOS, Windows |
+
 ## Features
 
 - **RFC 8259 Compliant Parsing** - Strict JSON parsing with proper error handling
