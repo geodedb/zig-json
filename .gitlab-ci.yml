@@ -12,12 +12,6 @@ include:
       stage: build
       zig_version: '0.15.2'
 
-  # Test - unit tests via component
-  - component: gitlab.com/devnw/ci-catalog/zig-test@v1.9.4
-    inputs:
-      stage: test
-      zig_version: '0.15.2'
-
   # Format checking
   - component: gitlab.com/devnw/ci-catalog/zig-format@v1.9.4
     inputs:
@@ -81,6 +75,12 @@ stages:
       fi
     - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
     - zig version
+
+test:unit:
+  extends: .zig-test-base
+  script:
+    - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
+    - zig build test --summary all
 
 test:acceptance:
   extends: .zig-test-base
