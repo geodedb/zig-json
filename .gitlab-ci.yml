@@ -48,8 +48,8 @@ build:
   before_script:
     - apk add --no-cache curl xz
     # Install Zig
-    - curl -L https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz | tar -xJ
-    - mv zig-linux-x86_64-0.14.0 /opt/zig
+    - curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz | tar -xJ
+    - mv zig-linux-x86_64-0.15.2 /opt/zig
     - export PATH="/opt/zig:$PATH"
   script:
     - export PATH="/opt/zig:$PATH"
@@ -66,8 +66,8 @@ test:unit:
   needs: [build]
   before_script:
     - apk add --no-cache curl xz
-    - curl -L https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz | tar -xJ
-    - mv zig-linux-x86_64-0.14.0 /opt/zig
+    - curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz | tar -xJ
+    - mv zig-linux-x86_64-0.15.2 /opt/zig
     - export PATH="/opt/zig:$PATH"
   script:
     - export PATH="/opt/zig:$PATH"
@@ -79,8 +79,8 @@ test:acceptance:
   needs: [build]
   before_script:
     - apk add --no-cache curl xz
-    - curl -L https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz | tar -xJ
-    - mv zig-linux-x86_64-0.14.0 /opt/zig
+    - curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz | tar -xJ
+    - mv zig-linux-x86_64-0.15.2 /opt/zig
     - export PATH="/opt/zig:$PATH"
   script:
     - export PATH="/opt/zig:$PATH"
@@ -92,8 +92,8 @@ test:edge-cases:
   needs: [build]
   before_script:
     - apk add --no-cache curl xz
-    - curl -L https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz | tar -xJ
-    - mv zig-linux-x86_64-0.14.0 /opt/zig
+    - curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz | tar -xJ
+    - mv zig-linux-x86_64-0.15.2 /opt/zig
     - export PATH="/opt/zig:$PATH"
   script:
     - export PATH="/opt/zig:$PATH"
@@ -105,8 +105,8 @@ test:json-schema-suite:
   needs: [build]
   before_script:
     - apk add --no-cache curl xz git
-    - curl -L https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz | tar -xJ
-    - mv zig-linux-x86_64-0.14.0 /opt/zig
+    - curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz | tar -xJ
+    - mv zig-linux-x86_64-0.15.2 /opt/zig
     - export PATH="/opt/zig:$PATH"
     # Fetch JSON Schema Test Suite from GitHub (external data source)
     - git clone --depth 1 https://github.com/json-schema-org/JSON-Schema-Test-Suite.git testdata/JSON-Schema-Test-Suite
