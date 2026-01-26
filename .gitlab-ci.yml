@@ -10,19 +10,19 @@ include:
   - component: gitlab.com/devnw/ci-catalog/zig-build@v1.9.3
     inputs:
       stage: build
-      zig_version: $ZIG_VERSION
+      zig_version: '0.15.2'
 
   # Test - unit tests via component
   - component: gitlab.com/devnw/ci-catalog/zig-test@v1.9.3
     inputs:
       stage: test
-      zig_version: $ZIG_VERSION
+      zig_version: '0.15.2'
 
   # Format checking
   - component: gitlab.com/devnw/ci-catalog/zig-format@v1.9.3
     inputs:
       stage: test
-      zig_version: $ZIG_VERSION
+      zig_version: '0.15.2'
       paths: 'src/ tests/ build.zig'
 
   # Security scanning
