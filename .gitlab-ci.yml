@@ -2,27 +2,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024-2025 CodePros
 
+variables:
+  ZIG_VERSION: '0.15.2'
+
 include:
-  # Security scanning (Advanced SAST enabled by default)
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.7.1
+  # Build
+  - component: gitlab.com/devnw/ci-catalog/zig-build@v1.9.3
+    inputs:
+      stage: build
+      zig_version: $ZIG_VERSION
+
+  # Test - unit tests via component
+  - component: gitlab.com/devnw/ci-catalog/zig-test@v1.9.3
+    inputs:
+      stage: test
+      zig_version: $ZIG_VERSION
+
+  # Format checking
+  - component: gitlab.com/devnw/ci-catalog/zig-format@v1.9.3
+    inputs:
+      stage: test
+      zig_version: $ZIG_VERSION
+      paths: 'src/ tests/ build.zig'
+
+  # Security scanning
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.9.3
     inputs:
       stage: security
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.9.3
     inputs:
       stage: security
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.9.3
     inputs:
       stage: security
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.9.3
 
   # SBOM generation and scanning
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.7.1
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.9.3
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.9.3
     inputs:
       allow_failure: true
 
   # Release creation
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.7.1
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.9.3
     inputs:
       stage: release
 
@@ -39,78 +61,53 @@ stages:
   - release
 
 # =============================================================================
-# Build & Test
+# Additional Test Jobs (specialized tests not covered by zig-test component)
 # =============================================================================
 
-build:
-  stage: build
-  image: alpine:latest
-  before_script:
-    - apk add --no-cache curl xz
-    # Install Zig
-    - curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
-    - mv zig-x86_64-linux-0.15.2 /opt/zig
-    - export PATH="/opt/zig:$PATH"
-  script:
-    - export PATH="/opt/zig:$PATH"
-    - zig build
-  artifacts:
-    paths:
-      - zig-out/
-      - .zig-cache/
-    expire_in: 1 hour
-
-test:unit:
+.zig-test-base:
   stage: test
-  image: alpine:latest
-  needs: [build]
+  image: ubuntu:24.04
+  cache:
+    key: "linux-zig-${ZIG_VERSION}"
+    paths:
+      - zig-${ZIG_VERSION}/
   before_script:
-    - apk add --no-cache curl xz
-    - curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
-    - mv zig-x86_64-linux-0.15.2 /opt/zig
-    - export PATH="/opt/zig:$PATH"
-  script:
-    - export PATH="/opt/zig:$PATH"
-    - zig build test
+    - apt-get update && apt-get install -y curl xz-utils
+    - |
+      if [ ! -f "zig-${ZIG_VERSION}/zig" ]; then
+        ARCHIVE_NAME="zig-x86_64-linux-${ZIG_VERSION}"
+        curl -L "https://ziglang.org/download/${ZIG_VERSION}/${ARCHIVE_NAME}.tar.xz" | tar -xJ
+        mv "${ARCHIVE_NAME}" "zig-${ZIG_VERSION}"
+      fi
+    - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
+    - zig version
 
 test:acceptance:
-  stage: test
-  image: alpine:latest
-  needs: [build]
-  before_script:
-    - apk add --no-cache curl xz
-    - curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
-    - mv zig-x86_64-linux-0.15.2 /opt/zig
-    - export PATH="/opt/zig:$PATH"
+  extends: .zig-test-base
   script:
-    - export PATH="/opt/zig:$PATH"
-    - zig build test-accept
+    - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
+    - zig build test-accept --summary all
 
 test:edge-cases:
-  stage: test
-  image: alpine:latest
-  needs: [build]
-  before_script:
-    - apk add --no-cache curl xz
-    - curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
-    - mv zig-x86_64-linux-0.15.2 /opt/zig
-    - export PATH="/opt/zig:$PATH"
+  extends: .zig-test-base
   script:
-    - export PATH="/opt/zig:$PATH"
-    - zig build test-data
+    - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
+    - zig build test-data --summary all
 
 test:json-schema-suite:
-  stage: test
-  image: alpine:latest
-  needs: [build]
+  extends: .zig-test-base
   before_script:
-    - apk add --no-cache curl xz git
-    - curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
-    - mv zig-x86_64-linux-0.15.2 /opt/zig
-    - export PATH="/opt/zig:$PATH"
+    - apt-get update && apt-get install -y curl xz-utils git
+    - |
+      if [ ! -f "zig-${ZIG_VERSION}/zig" ]; then
+        ARCHIVE_NAME="zig-x86_64-linux-${ZIG_VERSION}"
+        curl -L "https://ziglang.org/download/${ZIG_VERSION}/${ARCHIVE_NAME}.tar.xz" | tar -xJ
+        mv "${ARCHIVE_NAME}" "zig-${ZIG_VERSION}"
+      fi
+    - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
+    - zig version
     # Fetch JSON Schema Test Suite from GitHub (external data source)
     - git clone --depth 1 https://github.com/json-schema-org/JSON-Schema-Test-Suite.git testdata/JSON-Schema-Test-Suite
   script:
-    - export PATH="/opt/zig:$PATH"
-    - zig build test-schema
-
+    - export PATH="$PWD/zig-${ZIG_VERSION}:$PATH"
+    - zig build test-schema --summary all
