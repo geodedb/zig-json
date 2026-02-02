@@ -8,6 +8,10 @@
             .url = "https://gitlab.com/devnw/zig/uri/-/archive/v0.1.0/uri-v0.1.0.tar.gz",
             .hash = "uri-0.1.0-zVvOsXZLAQAfg1wUuvR2yQC3FLtQPAV85R2aS6EFiaZn",
         },
+        .spice = .{
+            .url = "https://github.com/judofyr/spice/archive/refs/heads/main.tar.gz",
+            .hash = "spice-0.0.0-3FtxfEq9AAD-Ghd-0OtZhifuq9DzPROtSMYbsAWAOYA2",
+        },
     },
     .paths = .{
         "build.zig",
