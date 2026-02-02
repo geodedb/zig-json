@@ -9,8 +9,8 @@
             .hash = "uri-0.1.0-zVvOsXZLAQAfg1wUuvR2yQC3FLtQPAV85R2aS6EFiaZn",
         },
         .spice = .{
-            .url = "https://github.com/judofyr/spice/archive/refs/heads/main.tar.gz",
-            .hash = "spice-0.0.0-3FtxfEq9AAD-Ghd-0OtZhifuq9DzPROtSMYbsAWAOYA2",
+            // Local copy of spice with Zig 0.15.x compatible build.zig
+            .path = "../spice-local",
         },
     },
     .paths = .{
