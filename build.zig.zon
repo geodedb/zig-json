@@ -9,8 +9,8 @@
             .hash = "uri-0.1.0-zVvOsXZLAQAfg1wUuvR2yQC3FLtQPAV85R2aS6EFiaZn",
         },
         .spice = .{
-            .url = "https://gitlab.com/devnw/zig/spice/-/archive/main/spice-main.tar.gz",
-            .hash = "spice-0.0.0-HnDb57y0AABlp7AaQKAkMShWpww-Tl_8QM7T-1Lx3auu",
+            .url = "git+https://gitlab.com/devnw/zig/spice.git#bbf106dc8131a514a4d1687cc2173f124f5c8181",
+            .hash = "spice-0.0.0-HnDb58jJAACojBd1dquGT-Ngc6TORlC6izlAKf0f4Rno",
         },
     },
     .paths = .{
