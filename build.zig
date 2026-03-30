@@ -9,10 +9,6 @@ pub fn build(b: *std.Build) void {
 
     const enable_spice = b.option(bool, "spice", "Enable spice-based parallelism") orelse true;
 
-    // Build options module
-    const build_options = b.addOptions();
-    build_options.addOption(bool, "enable_spice", enable_spice);
-
     // Get spice dependency if enabled
     const spice_mod: ?*std.Build.Module = if (enable_spice) blk: {
         const spice_dep = b.dependency("spice", .{
@@ -40,17 +36,16 @@ pub fn build(b: *std.Build) void {
     // Parallel Module
     // ============================================================
 
-    const parallel_mod = b.addModule("parallel", .{
+    const parallel_mod: ?*std.Build.Module = if (enable_spice) blk: {
+        break :blk b.addModule("parallel", .{
         .root_source_file = b.path("src/parallel.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "json_build_options", .module = build_options.createModule() },
         },
     });
-    if (spice_mod) |sm| {
-        parallel_mod.addImport("spice", sm);
-    }
+    } else null;
+    if (parallel_mod) |pm| { if (spice_mod) |sm| pm.addImport("spice", sm); }
 
     // ============================================================
     // Main JSON Module
@@ -61,7 +56,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "parallel", .module = parallel_mod },
+            
         },
     });
     if (uri_mod) |m| json_mod.addImport("uri", m);
@@ -184,7 +179,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
-                .{ .name = "parallel", .module = parallel_mod },
+                
             },
         }),
     });
