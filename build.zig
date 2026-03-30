@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
     const uri_dep = b.dependency("uri", .{
         .target = target,
         .optimize = optimize,
+        .spice = false,
     });
     const uri_mod = uri_dep.module("uri");
 
