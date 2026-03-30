@@ -26,12 +26,15 @@ pub fn build(b: *std.Build) void {
     // Dependencies
     // ============================================================
 
-    const uri_dep = b.dependency("uri", .{
-        .target = target,
-        .optimize = optimize,
-        .spice = false,
-    });
-    const uri_mod = uri_dep.module("uri");
+    const use_uri = b.option(bool, "uri", "Use internal uri dependency") orelse true;
+    const uri_mod: ?*std.Build.Module = if (use_uri) blk: {
+        const uri_dep = b.dependency("uri", .{
+            .target = target,
+            .optimize = optimize,
+            .spice = false,
+        });
+        break :blk uri_dep.module("uri");
+    } else null;
 
     // ============================================================
     // Parallel Module
@@ -58,10 +61,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "uri", .module = uri_mod },
             .{ .name = "parallel", .module = parallel_mod },
         },
     });
+    if (uri_mod) |m| json_mod.addImport("uri", m);
 
     // ============================================================
     // Unit Tests
@@ -72,11 +75,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/json.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "uri", .module = uri_mod },
-            },
         }),
     });
+    if (uri_mod) |m| json_tests.root_module.addImport("uri", m);
 
     const run_json_tests = b.addRunArtifact(json_tests);
 
