@@ -5,8 +5,8 @@
     .fingerprint = 0x6b072545e19eebb4,
     .dependencies = .{
         .uri = .{
-            .url = "git+https://gitlab.com/devnw/zig/uri.git#134e91c4a1f0201c13c2bfcf5ea42e92f847cba4",
-            .hash = "uri-0.1.0-zVvOsVZjAgCrAulOfrR9zZ0On_HxfXb3DoNIe4-Ynj9Y",
+            .url = "git+https://gitlab.com/devnw/zig/uri.git#0ba7f3ecd626025483935c6f0f6ffb8cdb7b0435",
+            .hash = "uri-0.1.0-zVvOsWJjAgCC6-4Ior8vBN2DoISJKifpMILTe4b-T6cP",
         },
         .spice = .{
             .url = "git+https://gitlab.com/devnw/zig/spice.git#bbf106dc8131a514a4d1687cc2173f124f5c8181",
