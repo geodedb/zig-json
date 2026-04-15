@@ -7,15 +7,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const enable_spice = b.option(bool, "spice", "Enable spice-based parallelism") orelse true;
+    const enable_tp = b.option(bool, "thread-pool", "Enable thread-pool-based parallelism") orelse true;
 
-    // Get spice dependency if enabled
-    const spice_mod: ?*std.Build.Module = if (enable_spice) blk: {
-        const spice_dep = b.dependency("spice", .{
+    // Get thread_pool dependency if enabled
+    const tp_mod: ?*std.Build.Module = if (enable_tp) blk: {
+        const tp_dep = b.dependency("thread_pool", .{
             .target = target,
             .optimize = optimize,
         });
-        break :blk spice_dep.module("spice");
+        break :blk tp_dep.module("thread_pool");
     } else null;
 
     // ============================================================
@@ -27,7 +27,6 @@ pub fn build(b: *std.Build) void {
         const uri_dep = b.dependency("uri", .{
             .target = target,
             .optimize = optimize,
-            .spice = false,
         });
         break :blk uri_dep.module("uri");
     } else null;
@@ -36,16 +35,17 @@ pub fn build(b: *std.Build) void {
     // Parallel Module
     // ============================================================
 
-    const parallel_mod: ?*std.Build.Module = if (enable_spice) blk: {
+    const parallel_mod: ?*std.Build.Module = if (enable_tp) blk: {
         break :blk b.addModule("parallel", .{
-        .root_source_file = b.path("src/parallel.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-        },
-    });
+            .root_source_file = b.path("src/parallel.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{},
+        });
     } else null;
-    if (parallel_mod) |pm| { if (spice_mod) |sm| pm.addImport("spice", sm); }
+    if (parallel_mod) |pm| {
+        if (tp_mod) |tm| pm.addImport("thread_pool", tm);
+    }
 
     // ============================================================
     // Main JSON Module
@@ -55,9 +55,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/json.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            
-        },
+        .imports = &.{},
     });
     if (uri_mod) |m| json_mod.addImport("uri", m);
 
@@ -178,9 +176,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("bench/parallel_bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
-            .imports = &.{
-                
-            },
+            .imports = &.{},
         }),
     });
     const run_parallel_bench = b.addRunArtifact(parallel_bench_exe);

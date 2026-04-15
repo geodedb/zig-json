@@ -1,45 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024-2025 CodePros
 
-//! Parallel JSON operations using spice heartbeat scheduling.
+//! Parallel JSON operations using thread-pool flat submission.
 //!
 //! Provides parallel processing for batch JSON operations like
 //! JSONL parsing, batch validation, and batch unmarshaling.
 
 const std = @import("std");
-const spice = if (true) @import("spice") else struct {
-    pub const ThreadPool = void;
-    pub const Task = void;
-    pub fn Future(comptime I: type, comptime O: type) type {
-        _ = I;
-        _ = O;
-        return void;
-    }
-};
+const tp = @import("thread_pool");
 
 // ============================================================================
-// Global Spice Thread Pool
+// Global Thread Pool
 // ============================================================================
 
-var global_pool: if (true) ?spice.ThreadPool else void = if (true) null else {};
+var global_pool: ?tp.ThreadPool = null;
 var pool_mutex: std.Thread.Mutex = .{};
 
-pub fn getPool() if (true) *spice.ThreadPool else void {
-    // spice always enabled when this module is compiled
-
+pub fn getPool() *tp.ThreadPool {
     pool_mutex.lock();
     defer pool_mutex.unlock();
 
     if (global_pool == null) {
-        global_pool = spice.ThreadPool.init(std.heap.page_allocator);
-        global_pool.?.start(.{});
+        global_pool = tp.ThreadPool.init(std.heap.page_allocator, .{}) catch @panic("thread-pool: init failed");
     }
     return &global_pool.?;
 }
 
 pub fn deinitPool() void {
-    // spice always enabled when this module is compiled
-
     pool_mutex.lock();
     defer pool_mutex.unlock();
 
@@ -60,15 +47,26 @@ pub const LineResult = struct {
     error_msg: ?[]const u8 = null,
 };
 
-/// Context for parallel line processing
-pub const LineProcessContext = struct {
+const MAX_CHUNKS = 64;
+
+/// Chunk context for parallel line processing
+const LineChunk = struct {
     lines: []const []const u8,
     results: []LineResult,
     start_line: usize,
+    process_fn: *const fn ([]const u8) bool,
 };
 
-/// Process multiple JSON lines in parallel (for JSONL)
-/// Returns number of successfully parsed lines
+fn lineChunkTask(ctx_ptr: *anyopaque, _: *tp.TaskContext) void {
+    const chunk: *LineChunk = @ptrCast(@alignCast(ctx_ptr));
+    for (chunk.lines, 0..) |line, i| {
+        const success = chunk.process_fn(line);
+        chunk.results[i] = .{ .line_num = chunk.start_line + i, .success = success };
+    }
+}
+
+/// Process multiple JSON lines in parallel (for JSONL).
+/// Returns number of successfully parsed lines.
 pub fn parallelProcessLines(
     lines: []const []const u8,
     results: []LineResult,
@@ -76,7 +74,8 @@ pub fn parallelProcessLines(
 ) usize {
     std.debug.assert(lines.len == results.len);
 
-    if (!true or lines.len < 16) {
+    const THRESHOLD = 16;
+    if (lines.len < THRESHOLD) {
         var success_count: usize = 0;
         for (lines, 0..) |line, i| {
             const success = processFn(line);
@@ -87,51 +86,50 @@ pub fn parallelProcessLines(
     }
 
     const pool = getPool();
-    return pool.call(usize, ParallelLineTask(processFn).task, LineProcessContext{
-        .lines = lines,
-        .results = results,
-        .start_line = 0,
-    });
-}
+    const chunk_size = @max(THRESHOLD, lines.len / MAX_CHUNKS);
 
-fn ParallelLineTask(comptime processFn: fn ([]const u8) bool) type {
-    return struct {
-        pub fn task(t: *spice.Task, ctx: LineProcessContext) usize {
-            const lines = ctx.lines;
-            const results = ctx.results;
-            const start_line = ctx.start_line;
-
-            if (lines.len < 8) {
-                var success_count: usize = 0;
-                for (lines, 0..) |line, i| {
-                    const success = processFn(line);
-                    results[i] = .{ .line_num = start_line + i, .success = success };
-                    if (success) success_count += 1;
-                }
-                return success_count;
-            }
-
-            const mid = lines.len / 2;
-            const left_ctx = LineProcessContext{
-                .lines = lines[0..mid],
-                .results = results[0..mid],
-                .start_line = start_line,
-            };
-            const right_ctx = LineProcessContext{
-                .lines = lines[mid..],
-                .results = results[mid..],
-                .start_line = start_line + mid,
-            };
-
-            var fut = spice.Future(LineProcessContext, usize).init();
-            fut.fork(t, task, right_ctx);
-
-            const left_count = t.call(usize, task, left_ctx);
-            const right_count = if (fut.join(t)) |val| val else t.call(usize, task, right_ctx);
-
-            return left_count + right_count;
+    // Wrap processFn in a type-erased function pointer
+    const Wrapper = struct {
+        fn call(line: []const u8) bool {
+            return processFn(line);
         }
     };
+
+    var chunks: [MAX_CHUNKS]LineChunk = undefined;
+    var batch: [MAX_CHUNKS]tp.BatchTask = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < lines.len and n < MAX_CHUNKS) {
+        const end = @min(i + chunk_size, lines.len);
+        chunks[n] = .{
+            .lines = lines[i..end],
+            .results = results[i..end],
+            .start_line = i,
+            .process_fn = &Wrapper.call,
+        };
+        batch[n] = .{ .task_fn = &lineChunkTask, .ctx = @ptrCast(&chunks[n]) };
+        n += 1;
+        i = end;
+    }
+
+    var wg = pool.waitGroup();
+    _ = pool.submitBatch(batch[0..n], .{ .wait_group = &wg }) catch {
+        // Fallback: sequential
+        var success_count: usize = 0;
+        for (lines, 0..) |line, j| {
+            const success = processFn(line);
+            results[j] = .{ .line_num = j, .success = success };
+            if (success) success_count += 1;
+        }
+        return success_count;
+    };
+    wg.wait();
+
+    var success_count: usize = 0;
+    for (results) |r| {
+        if (r.success) success_count += 1;
+    }
+    return success_count;
 }
 
 // ============================================================================
@@ -146,7 +144,18 @@ pub fn ArrayProcessContext(comptime T: type) type {
     };
 }
 
-/// Process array elements in parallel with a predicate
+/// Chunk context for parallel array processing (type-erased)
+const ArrayChunkBase = struct {
+    results: []bool,
+    run_fn: *const fn (ctx: *anyopaque) void,
+};
+
+fn arrayChunkTask(ctx_ptr: *anyopaque, _: *tp.TaskContext) void {
+    const base: *ArrayChunkBase = @ptrCast(@alignCast(ctx_ptr));
+    base.run_fn(ctx_ptr);
+}
+
+/// Process array elements in parallel with a predicate.
 pub fn parallelArrayProcess(
     comptime T: type,
     elements: []const T,
@@ -155,7 +164,8 @@ pub fn parallelArrayProcess(
 ) usize {
     std.debug.assert(elements.len == results.len);
 
-    if (!true or elements.len < 32) {
+    const THRESHOLD = 32;
+    if (elements.len < THRESHOLD) {
         var count: usize = 0;
         for (elements, 0..) |elem, i| {
             results[i] = predicate(elem);
@@ -164,83 +174,117 @@ pub fn parallelArrayProcess(
         return count;
     }
 
-    const pool = getPool();
-    const Ctx = ArrayProcessContext(T);
-    return pool.call(usize, ParallelArrayTask(T, predicate).task, Ctx{
-        .elements = elements,
-        .results = results,
-    });
-}
+    const Chunk = struct {
+        // base must be first so ptrCast in arrayChunkTask aligns correctly
+        base: ArrayChunkBase,
+        elements: []const T,
+    };
 
-fn ParallelArrayTask(comptime T: type, comptime predicate: fn (T) bool) type {
-    const Ctx = ArrayProcessContext(T);
-    return struct {
-        pub fn task(t: *spice.Task, ctx: Ctx) usize {
-            const elements = ctx.elements;
-            const results = ctx.results;
-
-            if (elements.len < 16) {
-                var count: usize = 0;
-                for (elements, 0..) |elem, i| {
-                    results[i] = predicate(elem);
-                    if (results[i]) count += 1;
-                }
-                return count;
+    const ChunkRunner = struct {
+        fn run(ctx_ptr: *anyopaque) void {
+            const chunk: *Chunk = @ptrCast(@alignCast(ctx_ptr));
+            for (chunk.elements, 0..) |elem, i| {
+                chunk.base.results[i] = predicate(elem);
             }
-
-            const mid = elements.len / 2;
-            const left_ctx = Ctx{ .elements = elements[0..mid], .results = results[0..mid] };
-            const right_ctx = Ctx{ .elements = elements[mid..], .results = results[mid..] };
-
-            var fut = spice.Future(Ctx, usize).init();
-            fut.fork(t, task, right_ctx);
-
-            const left_count = t.call(usize, task, left_ctx);
-            const right_count = if (fut.join(t)) |val| val else t.call(usize, task, right_ctx);
-
-            return left_count + right_count;
         }
     };
+
+    const pool = getPool();
+    const chunk_size = @max(THRESHOLD, elements.len / MAX_CHUNKS);
+
+    var chunks: [MAX_CHUNKS]Chunk = undefined;
+    var batch: [MAX_CHUNKS]tp.BatchTask = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < elements.len and n < MAX_CHUNKS) {
+        const end = @min(i + chunk_size, elements.len);
+        chunks[n] = .{
+            .base = .{ .results = results[i..end], .run_fn = &ChunkRunner.run },
+            .elements = elements[i..end],
+        };
+        batch[n] = .{ .task_fn = &arrayChunkTask, .ctx = @ptrCast(&chunks[n]) };
+        n += 1;
+        i = end;
+    }
+
+    var wg = pool.waitGroup();
+    _ = pool.submitBatch(batch[0..n], .{ .wait_group = &wg }) catch {
+        // Fallback: sequential
+        var count: usize = 0;
+        for (elements, 0..) |elem, j| {
+            results[j] = predicate(elem);
+            if (results[j]) count += 1;
+        }
+        return count;
+    };
+    wg.wait();
+
+    var count: usize = 0;
+    for (results) |r| {
+        if (r) count += 1;
+    }
+    return count;
 }
 
 // ============================================================================
 // Parallel Reduce for JSON Arrays
 // ============================================================================
 
+/// Chunk context for parallel sum
+fn SumChunk(comptime T: type) type {
+    return struct {
+        data: []const T,
+        partial: T,
+    };
+}
+
+fn makeSumTask(comptime T: type) tp.TaskFn {
+    return struct {
+        fn run(ctx_ptr: *anyopaque, _: *tp.TaskContext) void {
+            const chunk: *SumChunk(T) = @ptrCast(@alignCast(ctx_ptr));
+            var sum: T = 0;
+            for (chunk.data) |v| sum += v;
+            chunk.partial = sum;
+        }
+    }.run;
+}
+
 /// Parallel reduce over numeric array
 pub fn parallelSum(comptime T: type, data: []const T) T {
-    if (!true or data.len < 1024) {
+    const THRESHOLD = 1024;
+    if (data.len < THRESHOLD) {
         var sum: T = 0;
         for (data) |v| sum += v;
         return sum;
     }
 
     const pool = getPool();
-    return pool.call(T, ParallelSumTask(T).task, data);
-}
+    const chunk_size = @max(THRESHOLD, data.len / MAX_CHUNKS);
 
-fn ParallelSumTask(comptime T: type) type {
-    return struct {
-        pub fn task(t: *spice.Task, data: []const T) T {
-            if (data.len < 512) {
-                var sum: T = 0;
-                for (data) |v| sum += v;
-                return sum;
-            }
+    var chunks: [MAX_CHUNKS]SumChunk(T) = undefined;
+    var batch: [MAX_CHUNKS]tp.BatchTask = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < data.len and n < MAX_CHUNKS) {
+        const end = @min(i + chunk_size, data.len);
+        chunks[n] = .{ .data = data[i..end], .partial = 0 };
+        batch[n] = .{ .task_fn = makeSumTask(T), .ctx = @ptrCast(&chunks[n]) };
+        n += 1;
+        i = end;
+    }
 
-            const mid = data.len / 2;
-            const left = data[0..mid];
-            const right = data[mid..];
-
-            var fut = spice.Future([]const T, T).init();
-            fut.fork(t, task, right);
-
-            const left_sum = t.call(T, task, left);
-            const right_sum = if (fut.join(t)) |val| val else t.call(T, task, right);
-
-            return left_sum + right_sum;
-        }
+    var wg = pool.waitGroup();
+    _ = pool.submitBatch(batch[0..n], .{ .wait_group = &wg }) catch {
+        // Fallback: sequential
+        var sum: T = 0;
+        for (data) |v| sum += v;
+        return sum;
     };
+    wg.wait();
+
+    var total: T = 0;
+    for (chunks[0..n]) |chunk| total += chunk.partial;
+    return total;
 }
 
 // ============================================================================
@@ -248,16 +292,12 @@ fn ParallelSumTask(comptime T: type) type {
 // ============================================================================
 
 test "parallel sum" {
-    // spice always enabled when this module is compiled
-
     const data = [_]i64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     const sum = parallelSum(i64, &data);
     try std.testing.expectEqual(@as(i64, 55), sum);
 }
 
 test "parallel array process" {
-    // spice always enabled when this module is compiled
-
     const elements = [_]i32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     var results: [10]bool = undefined;
 
