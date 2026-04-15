@@ -38,7 +38,7 @@ pub fn Encoder(comptime WriterType: type) type {
         depth: usize,
 
         const Self = @This();
-        const Error = WriterType.Error || std.mem.Allocator.Error;
+        const Error = error{WriteFailed} || std.mem.Allocator.Error;
 
         const StateKind = enum { object, array };
         const State = struct {
@@ -145,7 +145,7 @@ pub fn Encoder(comptime WriterType: type) type {
         /// Write an integer value
         pub fn writeInt(self: *Self, value: anytype) Error!void {
             try self.writeCommaIfNeeded();
-            try std.fmt.format(self.writer, "{d}", .{value});
+            try self.writer.print("{d}", .{value});
             self.markNotFirst();
         }
 
@@ -156,7 +156,7 @@ pub fn Encoder(comptime WriterType: type) type {
             if (std.math.isNan(f) or std.math.isInf(f)) {
                 try self.writer.writeAll("null");
             } else {
-                try std.fmt.format(self.writer, "{d}", .{value});
+                try self.writer.print("{d}", .{value});
             }
             self.markNotFirst();
         }
@@ -520,10 +520,10 @@ test "debugJson escapes emoji as surrogate pair" {
 }
 
 test "streaming encoder simple object" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
-    var enc = encoder(std.testing.allocator, buf.writer(std.testing.allocator), .{});
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
     defer enc.deinit();
 
     try enc.beginObject();
@@ -533,14 +533,14 @@ test "streaming encoder simple object" {
     try enc.writeInt(@as(u32, 30));
     try enc.endObject();
 
-    try std.testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30}", buf.items);
+    try std.testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30}", aw.written());
 }
 
 test "streaming encoder nested structure" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
-    var enc = encoder(std.testing.allocator, buf.writer(std.testing.allocator), .{});
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
     defer enc.deinit();
 
     try enc.beginObject();
@@ -556,14 +556,14 @@ test "streaming encoder nested structure" {
     try enc.endArray();
     try enc.endObject();
 
-    try std.testing.expectEqualStrings("{\"user\":{\"id\":1},\"items\":[\"a\",\"b\"]}", buf.items);
+    try std.testing.expectEqualStrings("{\"user\":{\"id\":1},\"items\":[\"a\",\"b\"]}", aw.written());
 }
 
 test "streaming encoder with indent" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
-    var enc = encoder(std.testing.allocator, buf.writer(std.testing.allocator), .{ .indent = "  " });
+    var enc = encoder(std.testing.allocator, &aw.writer, .{ .indent = "  " });
     defer enc.deinit();
 
     try enc.beginObject();
@@ -571,15 +571,15 @@ test "streaming encoder with indent" {
     try enc.writeString("test");
     try enc.endObject();
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "  ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "  ") != null);
 }
 
 test "streaming encoder array values" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
-    var enc = encoder(std.testing.allocator, buf.writer(std.testing.allocator), .{});
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
     defer enc.deinit();
 
     try enc.beginArray();
@@ -589,14 +589,14 @@ test "streaming encoder array values" {
     try enc.writeFloat(@as(f64, 3.14));
     try enc.endArray();
 
-    try std.testing.expectEqualStrings("[null,true,42,3.14]", buf.items);
+    try std.testing.expectEqualStrings("[null,true,42,3.14]", aw.written());
 }
 
 test "streaming encoder writeValue" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
-    var enc = encoder(std.testing.allocator, buf.writer(std.testing.allocator), .{});
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
     defer enc.deinit();
 
     var members = [_]Member{
@@ -605,5 +605,5 @@ test "streaming encoder writeValue" {
 
     try enc.writeValue(.{ .obj = &members });
 
-    try std.testing.expectEqualStrings("{\"key\":\"value\"}", buf.items);
+    try std.testing.expectEqualStrings("{\"key\":\"value\"}", aw.written());
 }

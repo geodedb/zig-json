@@ -336,9 +336,15 @@ fn resolveIdUri(alloc: std.mem.Allocator, base: []const u8, id: []const u8) ![]c
     defer alloc.free(resolved.path); // Free the allocated path
 
     // Format resolved URI back to string
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    resolved.format(buf.writer(alloc)) catch return try alloc.dupe(u8, id);
-    return buf.toOwnedSlice(alloc);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    resolved.format(&aw.writer) catch {
+        aw.deinit();
+        return try alloc.dupe(u8, id);
+    };
+    return aw.toOwnedSlice() catch {
+        aw.deinit();
+        return try alloc.dupe(u8, id);
+    };
 }
 
 fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: SchemaOptions, err: *ParseError) !*SchemaNode {

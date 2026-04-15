@@ -1107,7 +1107,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
         fn ensureBuffer(self: *Self) !void {
             if (self.buf_pos >= self.buf_len) {
                 if (self.eof_reached) return error.EndOfStream;
-                const n = self.reader.read(self.read_buffer) catch return error.IoError;
+                const n = self.reader.readSliceShort(self.read_buffer) catch return error.IoError;
                 if (n == 0) {
                     self.eof_reached = true;
                     return error.EndOfStream;
@@ -1475,9 +1475,9 @@ fn readObjectFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
 test "ReaderTokenizer basic object" {
     const allocator = std.testing.allocator;
     const input = "{\"name\": \"Alice\", \"age\": 30}";
-    var stream = std.io.fixedBufferStream(input);
+    var reader: std.Io.Reader = .fixed(input);
 
-    var tokenizer = try readerTokenizer(allocator, stream.reader(), .{});
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
     defer tokenizer.deinit();
 
     try std.testing.expectEqual(TokenType.object_start, (try tokenizer.next()).type);
@@ -1499,9 +1499,9 @@ test "ReaderTokenizer basic object" {
 test "ReaderTokenizer array" {
     const allocator = std.testing.allocator;
     const input = "[1, true, null, \"test\"]";
-    var stream = std.io.fixedBufferStream(input);
+    var reader: std.Io.Reader = .fixed(input);
 
-    var tokenizer = try readerTokenizer(allocator, stream.reader(), .{});
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
     defer tokenizer.deinit();
 
     try std.testing.expectEqual(TokenType.array_start, (try tokenizer.next()).type);
@@ -1518,9 +1518,9 @@ test "ReaderTokenizer array" {
 test "ReaderTokenizer unicode escape" {
     const allocator = std.testing.allocator;
     const input = "\"Hello \\u0048\\u0065\\u006C\\u006C\\u006F\"";
-    var stream = std.io.fixedBufferStream(input);
+    var reader: std.Io.Reader = .fixed(input);
 
-    var tokenizer = try readerTokenizer(allocator, stream.reader(), .{});
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
     defer tokenizer.deinit();
 
     const token = try tokenizer.next();

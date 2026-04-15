@@ -129,10 +129,10 @@ pub const pretty_tab: EncodeOptions = .{ .indent = "\t" };
 
 /// Encode any Zig value to a JSON string
 pub fn encode(allocator: std.mem.Allocator, value: anytype, options: EncodeOptions) ![]u8 {
-    var list: std.ArrayList(u8) = .empty;
-    errdefer list.deinit(allocator);
-    try encodeToWriter(list.writer(allocator), value, options);
-    return list.toOwnedSlice(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try encodeToWriter(&aw.writer, value, options);
+    return aw.toOwnedSlice();
 }
 
 /// Encode any Zig value to a writer
