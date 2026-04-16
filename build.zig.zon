@@ -5,8 +5,8 @@
     .fingerprint = 0x6b072545e19eebb4,
     .dependencies = .{
         .uri = .{
-            .url = "git+https://gitlab.com/devnw/zig/uri.git#68b603c30375393cf76d111017f5b0c5ffd2961f",
-            .hash = "uri-0.1.0-zVvOsZlhAgBafFPMKItHDONtUJRATlLWy0JetxUMbzl3",
+            .url = "git+https://gitlab.com/devnw/zig/uri.git#3d196fbf25a78b8c38d43fbc694d779dce1f5ce2",
+            .hash = "uri-0.1.0-zVvOsTxgAgBybnD1lefeYXFLb1QreSi2lb-jh_mAman0",
         },
         .thread_pool = .{
             .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#a572f2c255f6d1d7163bacdad266b3f199854822",
