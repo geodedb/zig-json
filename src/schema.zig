@@ -150,9 +150,15 @@ fn resolveExternalRef(
         var resolved = uri_mod.resolve(alloc, parsed_base, parsed_ref) catch return;
         defer alloc.free(resolved.path);
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        resolved.format(buf.writer(alloc)) catch return;
-        resolved_ref = buf.toOwnedSlice(alloc) catch return;
+        var aw: std.Io.Writer.Allocating = .init(alloc);
+        resolved.format(&aw.writer) catch {
+            aw.deinit();
+            return;
+        };
+        resolved_ref = aw.toOwnedSlice() catch {
+            aw.deinit();
+            return;
+        };
         allocated = true;
     }
     defer if (allocated) alloc.free(resolved_ref);
@@ -780,9 +786,15 @@ fn resolveRef(alloc: std.mem.Allocator, schema: *const CompiledSchema, ref: []co
         var resolved = uri_mod.resolve(alloc, parsed_base, parsed_ref) catch return null;
         defer alloc.free(resolved.path); // Free the allocated path
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        resolved.format(buf.writer(alloc)) catch return null;
-        resolved_ref = buf.toOwnedSlice(alloc) catch return null;
+        var aw: std.Io.Writer.Allocating = .init(alloc);
+        resolved.format(&aw.writer) catch {
+            aw.deinit();
+            return null;
+        };
+        resolved_ref = aw.toOwnedSlice() catch {
+            aw.deinit();
+            return null;
+        };
         allocated = true;
     }
     defer if (allocated) alloc.free(resolved_ref);

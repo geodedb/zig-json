@@ -920,7 +920,7 @@ pub const ReaderTokenizerError = error{
     BufferOverflow,
 };
 
-/// A streaming JSON tokenizer that reads from any std.io.Reader
+/// A streaming JSON tokenizer that reads from any std.Io.Reader
 /// Enables parsing JSON from files, sockets, or any other stream
 /// without loading the entire input into memory.
 pub fn ReaderTokenizer(comptime ReaderType: type) type {
@@ -1531,9 +1531,9 @@ test "ReaderTokenizer unicode escape" {
 test "ReaderTokenizer read value" {
     const allocator = std.testing.allocator;
     const input = "{\"items\": [1, 2, 3], \"active\": true}";
-    var stream = std.io.fixedBufferStream(input);
+    var reader: std.Io.Reader = .fixed(input);
 
-    var tokenizer = try readerTokenizer(allocator, stream.reader(), .{});
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
     defer tokenizer.deinit();
 
     const value = try readValueFromReader(&tokenizer);
@@ -1549,9 +1549,9 @@ test "ReaderTokenizer read value" {
 test "ReaderTokenizer skip value" {
     const allocator = std.testing.allocator;
     const input = "{\"skip\": {\"nested\": [1,2,3]}} true";
-    var stream = std.io.fixedBufferStream(input);
+    var reader: std.Io.Reader = .fixed(input);
 
-    var tokenizer = try readerTokenizer(allocator, stream.reader(), .{});
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
     defer tokenizer.deinit();
 
     try tokenizer.skipValue();
@@ -1562,9 +1562,9 @@ test "ReaderTokenizer skip value" {
 test "ReaderTokenizer number formats" {
     const allocator = std.testing.allocator;
     const input = "42 -17 3.14 1e10 -2.5e-3";
-    var stream = std.io.fixedBufferStream(input);
+    var reader: std.Io.Reader = .fixed(input);
 
-    var tokenizer = try readerTokenizer(allocator, stream.reader(), .{});
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
     defer tokenizer.deinit();
 
     const t1 = try tokenizer.next();

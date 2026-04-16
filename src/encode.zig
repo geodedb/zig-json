@@ -344,12 +344,12 @@ fn encodeBinary(writer: anytype, data: []const u8, format: BinaryFormat, options
         },
         .hex => {
             for (data) |byte| {
-                try std.fmt.format(writer, "{x:0>2}", .{byte});
+                try writer.print("{x:0>2}", .{byte});
             }
         },
         .hex_upper => {
             for (data) |byte| {
-                try std.fmt.format(writer, "{X:0>2}", .{byte});
+                try writer.print("{X:0>2}", .{byte});
             }
         },
         .base32 => {
@@ -424,7 +424,7 @@ fn encodeStringContents(writer: anytype, s: []const u8, options: EncodeOptions) 
                 '\t' => try writer.writeAll("\\t"),
                 0x08 => try writer.writeAll("\\b"), // backspace
                 0x0C => try writer.writeAll("\\f"), // form feed
-                else => try std.fmt.format(writer, "\\u{X:0>4}", .{c}),
+                else => try writer.print("\\u{X:0>4}", .{c}),
             }
             i += 1;
         } else if (c == '"') {
@@ -456,13 +456,13 @@ fn encodeStringContents(writer: anytype, s: []const u8, options: EncodeOptions) 
             };
 
             if (cp <= 0xFFFF) {
-                try std.fmt.format(writer, "\\u{X:0>4}", .{cp});
+                try writer.print("\\u{X:0>4}", .{cp});
             } else {
                 // Surrogate pair for characters > U+FFFF
                 const adj = cp - 0x10000;
                 const high: u16 = @intCast(0xD800 + (adj >> 10));
                 const low: u16 = @intCast(0xDC00 + (adj & 0x3FF));
-                try std.fmt.format(writer, "\\u{X:0>4}\\u{X:0>4}", .{ high, low });
+                try writer.print("\\u{X:0>4}\\u{X:0>4}", .{ high, low });
             }
             i += len;
         } else {
@@ -478,74 +478,53 @@ fn encodeFmtFormatter(writer: anytype, value: anytype, options: EncodeOptions) !
     // Write opening quote
     try writer.writeByte('"');
 
-    // Use a wrapper writer that escapes JSON special characters
-    var escape_writer = JsonEscapeWriter(@TypeOf(writer)){
-        .underlying = writer,
-        .options = options,
-    };
+    // Use a buffer to capture format output, then escape it
+    var buf: [4096]u8 = undefined;
+    var fmt_writer: std.Io.Writer = .fixed(&buf);
+    value.format(&fmt_writer) catch {};
+    const formatted = fmt_writer.buffered();
 
-    // Call the type's format method with empty format spec and default options
-    try value.format("", .{}, escape_writer.writer());
+    // Escape and write the formatted output
+    for (formatted) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0C => try writer.writeAll("\\f"),
+            '/' => {
+                if (options.escape_slash) {
+                    try writer.writeAll("\\/");
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+            else => {
+                if (c < 0x20) {
+                    try writer.writeAll("\\u00");
+                    const hex = "0123456789ABCDEF";
+                    try writer.writeByte(hex[(c >> 4) & 0xF]);
+                    try writer.writeByte(hex[c & 0xF]);
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
 
     // Write closing quote
     try writer.writeByte('"');
 }
 
-/// Writer wrapper that escapes JSON special characters
-fn JsonEscapeWriter(comptime UnderlyingWriter: type) type {
-    return struct {
-        underlying: UnderlyingWriter,
-        options: EncodeOptions,
-
-        const Self = @This();
-        const Error = UnderlyingWriter.Error;
-
-        pub fn writer(self: *Self) std.io.GenericWriter(*Self, Error, write) {
-            return .{ .context = self };
-        }
-
-        fn write(self: *Self, bytes: []const u8) Error!usize {
-            for (bytes) |c| {
-                switch (c) {
-                    '"' => try self.underlying.writeAll("\\\""),
-                    '\\' => try self.underlying.writeAll("\\\\"),
-                    '\n' => try self.underlying.writeAll("\\n"),
-                    '\r' => try self.underlying.writeAll("\\r"),
-                    '\t' => try self.underlying.writeAll("\\t"),
-                    0x08 => try self.underlying.writeAll("\\b"),
-                    0x0C => try self.underlying.writeAll("\\f"),
-                    '/' => {
-                        if (self.options.escape_slash) {
-                            try self.underlying.writeAll("\\/");
-                        } else {
-                            try self.underlying.writeByte(c);
-                        }
-                    },
-                    else => {
-                        if (c < 0x20) {
-                            // Control characters
-                            try self.underlying.writeAll("\\u00");
-                            const hex = "0123456789ABCDEF";
-                            try self.underlying.writeByte(hex[(c >> 4) & 0xF]);
-                            try self.underlying.writeByte(hex[c & 0xF]);
-                        } else {
-                            try self.underlying.writeByte(c);
-                        }
-                    },
-                }
-            }
-            return bytes.len;
-        }
-    };
-}
-
 fn encodeInt(writer: anytype, value: anytype, stringify: bool) !void {
     if (stringify) {
         try writer.writeByte('"');
-        try std.fmt.format(writer, "{d}", .{value});
+        try writer.print("{d}", .{value});
         try writer.writeByte('"');
     } else {
-        try std.fmt.format(writer, "{d}", .{value});
+        try writer.print("{d}", .{value});
     }
 }
 
@@ -581,10 +560,10 @@ fn encodeFloat(writer: anytype, value: anytype, stringify: bool, allow_nan_infin
     // Use Zig's float formatting
     if (stringify) {
         try writer.writeByte('"');
-        try std.fmt.format(writer, "{d}", .{value});
+        try writer.print("{d}", .{value});
         try writer.writeByte('"');
     } else {
-        try std.fmt.format(writer, "{d}", .{value});
+        try writer.print("{d}", .{value});
     }
 }
 
@@ -2126,7 +2105,7 @@ test "encode type with format method using use_fmt_formatter" {
         x: i32,
         y: i32,
 
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             try writer.print("({d}, {d})", .{ self.x, self.y });
         }
     };
@@ -2148,7 +2127,7 @@ test "encode fmt.Formatter escapes special characters" {
     const Message = struct {
         text: []const u8,
 
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             try writer.writeAll(self.text);
         }
     };
@@ -2166,7 +2145,7 @@ test "encode fmt.Formatter with struct containing formatter" {
         g: u8,
         b: u8,
 
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             try writer.print("#{X:0>2}{X:0>2}{X:0>2}", .{ self.r, self.g, self.b });
         }
     };
