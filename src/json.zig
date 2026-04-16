@@ -36,6 +36,9 @@ pub const async_mod = @import("async.zig");
 pub const jsonld_mod = @import("jsonld.zig");
 pub const cbor_mod = @import("cbor.zig");
 
+/// Parallel operations (requires `thread_pool`).
+pub const parallel = @import("parallel.zig");
+
 /// Error codes for parse and schema errors
 pub const ErrorCode = enum {
     UnexpectedEof,
@@ -700,4 +703,16 @@ test {
     _ = async_mod;
     _ = jsonld_mod;
     _ = cbor_mod;
+    _ = parallel;
+}
+
+test "parallel re-export is reachable" {
+    // Smoke test: verify parallel.zig is reachable through the public json
+    // module, and exercise parallelSum end-to-end.
+    const data = [_]u32{ 1, 2, 3, 4 };
+    const total = parallel.parallelSum(u32, &data);
+    try std.testing.expectEqual(@as(u32, 10), total);
+
+    // deinitPool() must be callable through the re-export.
+    parallel.deinitPool();
 }

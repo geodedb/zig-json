@@ -58,6 +58,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{},
     });
     if (uri_mod) |m| json_mod.addImport("uri", m);
+    if (tp_mod) |tm| json_mod.addImport("thread_pool", tm);
 
     // ============================================================
     // Unit Tests
@@ -71,6 +72,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (uri_mod) |m| json_tests.root_module.addImport("uri", m);
+    if (tp_mod) |tm| json_tests.root_module.addImport("thread_pool", tm);
 
     const run_json_tests = b.addRunArtifact(json_tests);
 
