@@ -6,9 +6,8 @@ const std = @import("std");
 const json = @import("json");
 
 fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 10 * 1024 * 1024); // 10MB max
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(10 * 1024 * 1024));
 }
 
 // ============================================================

@@ -33,9 +33,8 @@ const MetaschemaResolver = struct {
             if (std.mem.eql(u8, uri_str, m.uri)) {
                 var path_buf: [512]u8 = undefined;
                 const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ metaschema_path, m.file }) catch return error.PathTooLong;
-                const file = std.fs.cwd().openFile(path, .{}) catch return error.FileNotFound;
-                defer file.close();
-                return file.readToEndAlloc(a, 10 * 1024 * 1024);
+                const io = std.Io.Threaded.global_single_threaded.io();
+                return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(10 * 1024 * 1024)) catch return error.FileNotFound;
             }
         }
         return error.UnknownUri;
@@ -49,9 +48,8 @@ const metaschema_resolver = json.Resolver{
 };
 
 fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(10 * 1024 * 1024));
 }
 
 fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
