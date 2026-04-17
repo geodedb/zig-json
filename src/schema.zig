@@ -339,7 +339,7 @@ fn resolveIdUri(alloc: std.mem.Allocator, base: []const u8, id: []const u8) ![]c
     // Resolve relative id against base
     const parsed_base = uri_mod.parse(base) catch return try alloc.dupe(u8, id);
     var resolved = uri_mod.resolve(alloc, parsed_base, parsed_id) catch return try alloc.dupe(u8, id);
-    defer alloc.free(resolved.path); // Free the allocated path
+    defer resolved.deinit(alloc); // Free every owned field.
 
     // Format resolved URI back to string
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -784,7 +784,7 @@ fn resolveRef(alloc: std.mem.Allocator, schema: *const CompiledSchema, ref: []co
         const parsed_ref = uri_mod.parse(ref) catch return null;
         const parsed_base = uri_mod.parse(current_base) catch return null;
         var resolved = uri_mod.resolve(alloc, parsed_base, parsed_ref) catch return null;
-        defer alloc.free(resolved.path); // Free the allocated path
+        defer resolved.deinit(alloc); // Free every owned field (scheme, host, path, query, …).
 
         var aw: std.Io.Writer.Allocating = .init(alloc);
         resolved.format(&aw.writer) catch {
