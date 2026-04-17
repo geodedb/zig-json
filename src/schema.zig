@@ -148,7 +148,7 @@ fn resolveExternalRef(
         const parsed_ref = uri_mod.parse(ref) catch return;
         const parsed_base = uri_mod.parse(base_uri) catch return;
         var resolved = uri_mod.resolve(alloc, parsed_base, parsed_ref) catch return;
-        defer alloc.free(resolved.path);
+        defer resolved.deinit(alloc);
 
         var aw: std.Io.Writer.Allocating = .init(alloc);
         resolved.format(&aw.writer) catch {
