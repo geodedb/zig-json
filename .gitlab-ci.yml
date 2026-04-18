@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024-2025 CodePros
 
+default:
+  tags:
+    - company
+
 include:
   # Security scanning
   - component: gitlab.com/devnw/ci-catalog/security-sast@v1.7.1
