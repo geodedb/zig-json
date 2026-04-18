@@ -1,0 +1,32 @@
+.{
+    // URI/URL parsing and manipulation library for Zig
+    // Implements: RFC 3986 (URI), RFC 8141 (URN)
+    // Planned: RFC 3987 (IRI), RFC 6874 (IPv6 Zone ID), WHATWG URL Standard
+    .name = .uri,
+
+    // Semantic versioning - https://semver.org/
+    .version = "0.1.0",
+
+    // Unique package fingerprint - do not modify
+    .fingerprint = 0x841cb121b1ce5bcd,
+
+    // Minimum supported Zig version
+    .minimum_zig_version = "0.16.0",
+
+    // Dependencies
+    .dependencies = .{
+        // thread-pool bounded thread pool for parallel operations
+        .thread_pool = .{
+            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#882eef980888d29cdfddaeede9cee20629084d07",
+            .hash = "thread_pool-0.2.0-11B1BvnedQC2QdmiFQrqqlWvD2pKeEx8Dg5dSkrv2oj-",
+        },
+    },
+
+    // Files included in the package hash
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+    },
+}
