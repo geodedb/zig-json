@@ -1168,7 +1168,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         }
 
         if (node.pattern) |pat| {
-            const matches = pat.match(str, ctx.opts.regex_max_steps) catch false;
+            const matches = pat.match(ctx.allocator, str, ctx.opts.regex_max_steps) catch false;
             if (!matches) {
                 try ctx.addError(inst_ptr, node.location, "pattern", "does not match pattern");
             }
@@ -1308,7 +1308,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         if (node.pattern_properties) |patterns| {
             for (obj) |m| {
                 for (patterns) |pp| {
-                    const matches = pp.pattern.match(m.k, ctx.opts.regex_max_steps) catch false;
+                    const matches = pp.pattern.match(ctx.allocator, m.k, ctx.opts.regex_max_steps) catch false;
                     if (matches) {
                         const prop_ptr = try ctx.allocPtr(inst_ptr, m.k);
                         try validateNode(ctx, m.v, pp.schema, prop_ptr, depth);
@@ -1329,7 +1329,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
 
                 if (!covered and node.pattern_properties != null) {
                     for (node.pattern_properties.?) |pp| {
-                        if (pp.pattern.match(m.k, ctx.opts.regex_max_steps) catch false) {
+                        if (pp.pattern.match(ctx.allocator, m.k, ctx.opts.regex_max_steps) catch false) {
                             covered = true;
                             break;
                         }
