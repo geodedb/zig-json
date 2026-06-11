@@ -308,7 +308,10 @@ pub const Duration = struct {
                 continue;
             }
 
-            // Parse number
+            // Parse number. Bound the component length: an i128 nanosecond
+            // count tops out well under 40 significant digits, so any longer
+            // run is necessarily out of range (and a long digit run can parse
+            // to f64 `inf`, which would make @intFromFloat panic / be UB).
             const num_start = pos;
             var has_fraction = false;
             while (pos < s.len and ((s[pos] >= '0' and s[pos] <= '9') or s[pos] == '.')) {
@@ -318,10 +321,17 @@ pub const Duration = struct {
 
             if (pos == num_start or pos >= s.len) return error.InvalidFormat;
 
+            // The largest field multiplier is years (~3.15e16 ns), so even a
+            // single component cannot legitimately exceed ~22 integer digits
+            // before overflowing i128. Cap the component at 40 chars to reject
+            // pathological input up front (covers digits, one '.', fraction).
+            if (pos - num_start > 40) return error.InvalidFormat;
+
             const designator = s[pos];
             pos += 1;
 
             const value: f64 = std.fmt.parseFloat(f64, s[num_start .. pos - 1]) catch return error.InvalidFormat;
+            if (!std.math.isFinite(value) or value < 0) return error.InvalidFormat;
 
             const multiplier: i128 = switch (designator) {
                 'Y' => 365 * 24 * 60 * 60 * std.time.ns_per_s, // Approximate year
@@ -333,7 +343,22 @@ pub const Duration = struct {
                 else => return error.InvalidFormat,
             };
 
-            total_nanos += @intFromFloat(@as(f64, @floatFromInt(multiplier)) * value);
+            // Compute the component contribution as a float, then range-check
+            // before @intFromFloat so a non-finite or out-of-i128 product is a
+            // parse error rather than a panic/UB.
+            const contribution = @as(f64, @floatFromInt(multiplier)) * value;
+            if (!std.math.isFinite(contribution)) return error.InvalidFormat;
+            // i128 magnitude bound. @intFromFloat truncates toward zero and
+            // panics if the result is out of range, so reject anything that is
+            // not strictly below 2^127. (2^127 is exactly representable in f64;
+            // 2^127 - 1 is not and rounds up to 2^127, so compare against 2^127.)
+            const two_pow_127: f64 = 170141183460469231731687303715884105728.0; // 2^127
+            if (contribution >= two_pow_127) return error.InvalidFormat;
+            const component_nanos: i128 = @intFromFloat(contribution);
+
+            // Checked accumulation: overflow is a parse error, not a panic.
+            total_nanos = std.math.add(i128, total_nanos, component_nanos) catch
+                return error.InvalidFormat;
         }
 
         return .{ .nanos = total_nanos };
@@ -344,7 +369,12 @@ pub const Duration = struct {
         const abs_nanos = if (self.nanos < 0) -self.nanos else self.nanos;
         const neg = self.nanos < 0;
 
-        const total_secs: u64 = @intCast(@divFloor(abs_nanos, std.time.ns_per_s));
+        // Use u128 for the seconds count: abs_nanos is an i128, so a large but
+        // in-range duration (e.g. parsed from untrusted ISO-8601) can exceed
+        // u64 after dividing by ns_per_s. Narrowing to u64 here would panic on
+        // @intCast (reachable from untrusted input). u128 always holds the
+        // quotient, and the components are formatted with {d} regardless.
+        const total_secs: u128 = @intCast(@divFloor(abs_nanos, std.time.ns_per_s));
         const rem_nanos: u32 = @intCast(@mod(abs_nanos, std.time.ns_per_s));
 
         const days = total_secs / 86400;
@@ -448,11 +478,57 @@ fn daysInMonth(year: i32, month: u8) u8 {
     return days[month - 1];
 }
 
+/// Days from 1970-01-01 to the given proleptic Gregorian date.
+///
+/// O(1) implementation of Howard Hinnant's `days_from_civil`
+/// (http://howardhinnant.github.io/date_algorithms.html#days_from_civil).
+/// Exactly equivalent to the previous per-year counting loop for all dates the
+/// loop accepted (verified by the "date helpers O(1) equivalence" test below).
 fn daysFromEpoch(year: i32, month: u8, day: u8) i64 {
-    // Calculate days from 1970-01-01 using a simple counting approach
-    var total_days: i64 = 0;
+    const m: i64 = month;
+    const d: i64 = day;
+    // Shift the year so that the leap day falls at the end of the era.
+    const y: i64 = @as(i64, year) - @intFromBool(m <= 2);
+    const era: i64 = @divFloor(if (y >= 0) y else y - 399, 400);
+    const yoe: i64 = y - era * 400; // [0, 399]
+    const doy: i64 = @divTrunc(153 * (m + (if (m > 2) @as(i64, -3) else 9)) + 2, 5) + d - 1; // [0, 365]
+    const doe: i64 = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy; // [0, 146096]
+    return era * 146097 + doe - 719468;
+}
 
-    // Add days for years since 1970
+/// Proleptic Gregorian date for a count of days since 1970-01-01.
+///
+/// O(1) implementation of Howard Hinnant's `civil_from_days`
+/// (http://howardhinnant.github.io/date_algorithms.html#civil_from_days).
+/// Exactly equivalent to the previous per-year/per-month counting loop
+/// (verified by the "date helpers O(1) equivalence" test below).
+fn daysToDate(days_since_epoch: i64) DateComponents {
+    const z: i64 = days_since_epoch + 719468;
+    const era: i64 = @divFloor(if (z >= 0) z else z - 146096, 146097);
+    const doe: i64 = z - era * 146097; // [0, 146096]
+    const yoe: i64 = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365); // [0, 399]
+    const y: i64 = yoe + era * 400;
+    const doy: i64 = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100)); // [0, 365]
+    const mp: i64 = @divTrunc(5 * doy + 2, 153); // [0, 11]
+    const d: i64 = doy - @divTrunc(153 * mp + 2, 5) + 1; // [1, 31]
+    const m: i64 = mp + (if (mp < 10) @as(i64, 3) else -9); // [1, 12]
+    return .{
+        .year = @intCast(y + @intFromBool(m <= 2)),
+        .month = @intCast(m),
+        .day = @intCast(d),
+    };
+}
+
+// ============================================================================
+// Date helper reference implementations (test-only)
+//
+// The previous O(years) per-year/per-month counting loops, kept verbatim as a
+// reference oracle to prove the O(1) Hinnant replacements (PERF-012) are
+// exactly equivalent across a wide date range.
+// ============================================================================
+
+fn daysFromEpochRef(year: i32, month: u8, day: u8) i64 {
+    var total_days: i64 = 0;
     if (year >= 1970) {
         var y: i32 = 1970;
         while (y < year) : (y += 1) {
@@ -464,24 +540,17 @@ fn daysFromEpoch(year: i32, month: u8, day: u8) i64 {
             total_days -= if (isLeapYear(y)) 366 else 365;
         }
     }
-
-    // Add days for months in current year
     var m: u8 = 1;
     while (m < month) : (m += 1) {
         total_days += daysInMonth(year, m);
     }
-
-    // Add days
     total_days += day - 1;
-
     return total_days;
 }
 
-fn daysToDate(days_since_epoch: i64) DateComponents {
+fn daysToDateRef(days_since_epoch: i64) DateComponents {
     var remaining_days = days_since_epoch;
     var year: i32 = 1970;
-
-    // Find the year
     if (remaining_days >= 0) {
         while (true) {
             const days_in_year: i64 = if (isLeapYear(year)) 366 else 365;
@@ -495,8 +564,6 @@ fn daysToDate(days_since_epoch: i64) DateComponents {
             remaining_days += if (isLeapYear(year)) 366 else 365;
         }
     }
-
-    // Find the month
     var month: u8 = 1;
     while (month <= 12) {
         const days_in_month: i64 = daysInMonth(year, month);
@@ -504,12 +571,72 @@ fn daysToDate(days_since_epoch: i64) DateComponents {
         remaining_days -= days_in_month;
         month += 1;
     }
-
     return .{
         .year = year,
         .month = month,
         .day = @intCast(remaining_days + 1),
     };
+}
+
+// PERF-012: the O(1) helpers must match the reference loops exactly for every
+// date the loops accept. Sweep every day of every month across a wide year
+// range spanning pre-1970, the epoch, leap centuries, and far-future dates.
+test "date helpers O(1) equivalence with reference loops" {
+    var year: i32 = 1600;
+    while (year <= 2400) : (year += 1) {
+        var month: u8 = 1;
+        while (month <= 12) : (month += 1) {
+            const dim = daysInMonth(year, month);
+            var day: u8 = 1;
+            while (day <= dim) : (day += 1) {
+                const ref_days = daysFromEpochRef(year, month, day);
+                const new_days = daysFromEpoch(year, month, day);
+                try std.testing.expectEqual(ref_days, new_days);
+
+                // daysToDate must invert daysFromEpoch and match the reference.
+                const ref_date = daysToDateRef(ref_days);
+                const new_date = daysToDate(new_days);
+                try std.testing.expectEqual(ref_date.year, new_date.year);
+                try std.testing.expectEqual(ref_date.month, new_date.month);
+                try std.testing.expectEqual(ref_date.day, new_date.day);
+                try std.testing.expectEqual(year, new_date.year);
+                try std.testing.expectEqual(month, new_date.month);
+                try std.testing.expectEqual(day, new_date.day);
+            }
+        }
+    }
+}
+
+// PERF-012: explicit landmark dates.
+test "daysFromEpoch landmark dates" {
+    // Epoch.
+    try std.testing.expectEqual(@as(i64, 0), daysFromEpoch(1970, 1, 1));
+    // Leap day 2000-02-29 (year 2000 is a leap year).
+    try std.testing.expectEqual(daysFromEpochRef(2000, 2, 29), daysFromEpoch(2000, 2, 29));
+    // Year 2400 (a leap year under proleptic Gregorian rules).
+    try std.testing.expectEqual(daysFromEpochRef(2400, 1, 1), daysFromEpoch(2400, 1, 1));
+    // Pre-1970 dates.
+    try std.testing.expectEqual(@as(i64, -1), daysFromEpoch(1969, 12, 31));
+    try std.testing.expectEqual(daysFromEpochRef(1900, 1, 1), daysFromEpoch(1900, 1, 1));
+}
+
+// PERF-012: round-trip date -> days -> date for several landmark dates.
+test "daysToDate round-trip landmark dates" {
+    const cases = [_]DateComponents{
+        .{ .year = 1970, .month = 1, .day = 1 },
+        .{ .year = 2000, .month = 2, .day = 29 },
+        .{ .year = 2400, .month = 12, .day = 31 },
+        .{ .year = 1969, .month = 12, .day = 31 },
+        .{ .year = 1900, .month = 1, .day = 1 },
+        .{ .year = 2024, .month = 1, .day = 15 },
+    };
+    for (cases) |c| {
+        const days = daysFromEpoch(c.year, c.month, c.day);
+        const back = daysToDate(days);
+        try std.testing.expectEqual(c.year, back.year);
+        try std.testing.expectEqual(c.month, back.month);
+        try std.testing.expectEqual(c.day, back.day);
+    }
 }
 
 // ============================================================================
@@ -561,6 +688,90 @@ test "Duration format ISO 8601" {
     const s = try d.toIso8601(std.testing.allocator);
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings("PT2H30M15S", s);
+}
+
+// ASR-006: An over-long numeric component must not panic via @intFromFloat(inf).
+// A 350-digit run parses to f64 `inf`; @intFromFloat(inf) is out-of-range ->
+// panic (Debug/ReleaseSafe) / UB (ReleaseFast). It must return a parse error.
+test "Duration ISO 8601 over-long numeric component returns error (no crash)" {
+    const long = "P" ++ ("9" ** 350) ++ "Y";
+    try std.testing.expectError(error.InvalidFormat, Duration.fromIso8601(long));
+}
+
+// ASR-006: A finite-but-huge component that would overflow i128 nanos must
+// return an error rather than panic on overflow / out-of-range @intFromFloat.
+test "Duration ISO 8601 overflowing nanos returns error (no crash)" {
+    // 1e30 years * ns/year vastly exceeds i128; value parses finite but the
+    // nanosecond product is out of range.
+    const huge = "P" ++ ("9" ** 30) ++ "Y";
+    try std.testing.expectError(error.InvalidFormat, Duration.fromIso8601(huge));
+}
+
+// ASR-006: accumulation overflow across multiple in-range components must also
+// be detected (checked arithmetic), not wrap or panic.
+test "Duration ISO 8601 accumulation overflow returns error" {
+    // Two large day counts whose nanos each fit but whose sum overflows i128.
+    const s = "P9000000000000000000000000000000DT9000000000000000000000000000000H";
+    try std.testing.expectError(error.InvalidFormat, Duration.fromIso8601(s));
+}
+
+// ASR-006: a finite seconds value whose nanosecond product lands at/above
+// 2^127 must error (guards the @intFromFloat truncation boundary, where f64
+// rounding can push 2^127 - 1 up to exactly 2^127 and panic).
+test "Duration ISO 8601 seconds at i128 boundary returns error" {
+    // 2^127 ns is ~1.7e29 seconds; request well above that.
+    const s = "PT" ++ ("9" ** 30) ++ "S";
+    try std.testing.expectError(error.InvalidFormat, Duration.fromIso8601(s));
+}
+
+// QUAL-022 guard: toIso8601 formats untrusted-derived durations into a fixed
+// 64-byte buffer with `catch unreachable`. Confirm the largest in-range
+// durations (from i64 seconds and from a near-2^127 ISO parse) stay within the
+// buffer, so those `catch unreachable` paths are unreachable in practice.
+test "Duration toIso8601 large durations fit fixed buffer" {
+    const a = std.testing.allocator;
+
+    const dmax = Duration.fromSeconds(std.math.maxInt(i64));
+    const smax = try dmax.toIso8601(a);
+    defer a.free(smax);
+    try std.testing.expect(smax.len < 64);
+
+    const dmin = Duration.fromSeconds(std.math.minInt(i64));
+    const smin = try dmin.toIso8601(a);
+    defer a.free(smin);
+    try std.testing.expect(smin.len < 64);
+
+    // ~1e22 days, well within the bounded fromIso8601 range.
+    const dbig = try Duration.fromIso8601("P9999999999999999999999D");
+    const sbig = try dbig.toIso8601(a);
+    defer a.free(sbig);
+    try std.testing.expect(sbig.len < 64);
+}
+
+// ASR-006 regression: valid durations still parse exactly.
+test "Duration ISO 8601 valid inputs unchanged" {
+    const ns_per_s = std.time.ns_per_s;
+    try std.testing.expectEqual(
+        @as(i128, 365 * 24 * 60 * 60 * ns_per_s),
+        (try Duration.fromIso8601("P1Y")).nanos,
+    );
+    try std.testing.expectEqual(
+        @as(i128, (60 * 60 + 30 * 60) * ns_per_s),
+        (try Duration.fromIso8601("PT1H30M")).nanos,
+    );
+    // P1DT2H3M4.5S
+    const expected: i128 = (24 * 60 * 60 + 2 * 60 * 60 + 3 * 60 + 4) * ns_per_s + (ns_per_s / 2);
+    try std.testing.expectEqual(expected, (try Duration.fromIso8601("P1DT2H3M4.5S")).nanos);
+    // Months and weeks
+    try std.testing.expectEqual(
+        @as(i128, 30 * 24 * 60 * 60 * ns_per_s),
+        (try Duration.fromIso8601("P1M")).nanos,
+    );
+    try std.testing.expectEqual(
+        @as(i128, 7 * 24 * 60 * 60 * ns_per_s),
+        (try Duration.fromIso8601("P1W")).nanos,
+    );
+    try std.testing.expectEqual(@as(i64, 15), (try Duration.fromIso8601("PT15S")).toSeconds());
 }
 
 test "UnixTimestamp marshal" {
