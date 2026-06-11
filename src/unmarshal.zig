@@ -212,10 +212,17 @@ fn fromValueInternal(comptime T: type, allocator: std.mem.Allocator, value: Valu
                         // Array of other type
                         if (value != .arr) return error.TypeMismatch;
                         var result = allocator.alloc(ptr.child, value.arr.len) catch return error.OutOfMemory;
-                        errdefer allocator.free(result);
+                        // Free already-built elements (and the spine) if an element
+                        // fails mid-build (ASR-011), not just the backing array.
+                        var built: usize = 0;
+                        errdefer {
+                            for (result[0..built]) |*el| freeInternal(ptr.child, allocator, el);
+                            allocator.free(result);
+                        }
 
                         for (value.arr, 0..) |item, i| {
                             result[i] = try fromValueInternal(ptr.child, allocator, item, opts);
+                            built = i + 1;
                         }
                         return result;
                     }
@@ -244,8 +251,12 @@ fn fromValueInternal(comptime T: type, allocator: std.mem.Allocator, value: Valu
                 if (value != .arr) return error.TypeMismatch;
                 if (value.arr.len != arr.len) return error.InvalidFormat;
                 var result: [arr.len]arr.child = undefined;
+                // Free already-built elements if a later element fails (ASR-011).
+                var built: usize = 0;
+                errdefer for (result[0..built]) |*el| freeInternal(arr.child, allocator, el);
                 for (value.arr, 0..) |item, i| {
                     result[i] = try fromValueInternal(arr.child, allocator, item, opts);
+                    built = i + 1;
                 }
                 return result;
             }
@@ -363,18 +374,30 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                         var result = allocator.alloc(ptr.child, value.arr.len) catch {
                             return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory", null, null) };
                         };
-                        errdefer allocator.free(result);
+                        // This function returns a result union (not an error union),
+                        // so errdefer does not fire on `.err` returns. Free the
+                        // already-built elements and the spine explicitly (ASR-011).
+                        var built: usize = 0;
 
                         for (value.arr, 0..) |item, i| {
                             const item_path = pointer.appendIndex(path, i, allocator) catch {
+                                for (result[0..built]) |*el| freeInternal(ptr.child, allocator, el);
+                                allocator.free(result);
                                 return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
                             };
                             defer allocator.free(item_path);
 
                             const item_result = fromValueInternalWithPath(ptr.child, allocator, item, opts, item_path);
                             switch (item_result) {
-                                .ok => |v| result[i] = v,
-                                .err => |e| return .{ .err = e },
+                                .ok => |v| {
+                                    result[i] = v;
+                                    built = i + 1;
+                                },
+                                .err => |e| {
+                                    for (result[0..built]) |*el| freeInternal(ptr.child, allocator, el);
+                                    allocator.free(result);
+                                    return .{ .err = e };
+                                },
                             }
                         }
                         return .{ .ok = result };
@@ -417,16 +440,26 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                     return .{ .err = makePathError(allocator, path, .invalid_format, "Array length mismatch", null, null) };
                 }
                 var result: [arr.len]arr.child = undefined;
+                // Free already-built elements on error (ASR-011); errdefer does not
+                // fire here because the function returns a result union, not an error.
+                var built: usize = 0;
                 for (value.arr, 0..) |item, i| {
                     const item_path = pointer.appendIndex(path, i, allocator) catch {
+                        for (result[0..built]) |*el| freeInternal(arr.child, allocator, el);
                         return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
                     };
                     defer allocator.free(item_path);
 
                     const item_result = fromValueInternalWithPath(arr.child, allocator, item, opts, item_path);
                     switch (item_result) {
-                        .ok => |v| result[i] = v,
-                        .err => |e| return .{ .err = e },
+                        .ok => |v| {
+                            result[i] = v;
+                            built = i + 1;
+                        },
+                        .err => |e| {
+                            for (result[0..built]) |*el| freeInternal(arr.child, allocator, el);
+                            return .{ .err = e };
+                        },
                     }
                 }
                 return .{ .ok = result };
@@ -504,6 +537,12 @@ fn unmarshalStruct(
 ) UnmarshalError!T {
     var result: T = undefined;
     var fields_found: [s.fields.len]bool = [_]bool{false} ** s.fields.len;
+    // Track which fields hold owned heap memory so that, if a later field/member
+    // fails, the already-populated prefix is freed before the error propagates
+    // (ASR-011). Inline struct/optional fields are zero-initialized below and may
+    // accumulate owned memory across members, so they are tracked from the start.
+    var fields_owned: [s.fields.len]bool = [_]bool{false} ** s.fields.len;
+    errdefer freePopulatedFields(T, s, allocator, &result, fields_owned);
 
     // Find unknown field at comptime (if any)
     const unknown_field_idx = comptime findUnknownFieldIndex(T, s);
@@ -517,9 +556,11 @@ fn unmarshalStruct(
                 // Initialize with defaults/zeroes before populating
                 @field(result, field.name) = std.mem.zeroes(field.type);
                 fields_found[i] = true; // Mark as found - we'll populate it inline
+                fields_owned[i] = true; // May accumulate owned memory across members
             } else if (ft_info == .optional) {
                 @field(result, field.name) = null;
                 fields_found[i] = true;
+                fields_owned[i] = true; // May accumulate owned memory across members
             }
         } else if (field_cfg.unknown) {
             // Mark unknown field as found - we'll populate it with collected members
@@ -564,6 +605,7 @@ fn unmarshalStruct(
                     opts,
                 );
                 fields_found[i] = true;
+                fields_owned[i] = true;
                 matched = true;
             }
         }
@@ -580,27 +622,10 @@ fn unmarshalStruct(
         }
     }
 
-    // Assign collected unknown members to the unknown field
-    if (unknown_field_idx) |idx| {
-        const unknown_slice = try unknown_list.toOwnedSlice(allocator);
-        inline for (s.fields, 0..) |field, i| {
-            if (i == idx) {
-                const field_cfg = comptime getFieldConfig(T, field.name);
-                if (field_cfg.unknown) {
-                    try assignUnknownMembers(field.type, &@field(result, field.name), unknown_slice, allocator);
-                }
-            }
-        }
-    } else if (unknown_list_initialized) {
-        // Clean up if we collected but have no unknown field (shouldn't happen normally)
-        for (unknown_list.items) |m| {
-            allocator.free(m.k);
-            freeClonedValue(allocator, m.v);
-        }
-        unknown_list.deinit(allocator);
-    }
-
-    // Check required fields and set defaults
+    // Check required fields and set defaults BEFORE assigning unknown members.
+    // Doing this first means a MissingField error here is handled by the
+    // fields_owned / unknown_list errdefers above (ASR-011); the unknown field is
+    // always fields_found=true, so its own check is unaffected by the reorder.
     inline for (s.fields, 0..) |field, i| {
         const field_cfg = comptime getFieldConfig(T, field.name);
 
@@ -620,7 +645,52 @@ fn unmarshalStruct(
         }
     }
 
+    // Assign collected unknown members to the unknown field. After this point no
+    // further errors are returned, so the unknown field need not be tracked in
+    // fields_owned.
+    if (unknown_field_idx) |idx| {
+        const unknown_slice = try unknown_list.toOwnedSlice(allocator);
+        inline for (s.fields, 0..) |field, i| {
+            if (i == idx) {
+                const field_cfg = comptime getFieldConfig(T, field.name);
+                if (field_cfg.unknown) {
+                    try assignUnknownMembers(field.type, &@field(result, field.name), unknown_slice, allocator);
+                }
+            }
+        }
+    } else if (unknown_list_initialized) {
+        // Clean up if we collected but have no unknown field (shouldn't happen normally)
+        for (unknown_list.items) |m| {
+            allocator.free(m.k);
+            freeClonedValue(allocator, m.v);
+        }
+        unknown_list.deinit(allocator);
+    }
+
     return result;
+}
+
+/// Free the owned heap memory of struct fields that were already populated when
+/// an error occurred mid-unmarshal (ASR-011). Only fields flagged in `owned` are
+/// freed; default/null/primitive fields are left untouched. Reuses freeInternal.
+///
+/// `unknown`/`skip`-configured fields are excluded at comptime: they are never
+/// flagged owned, and their types (e.g. []Member, StringHashMap(Value)) are not
+/// freeInternal-compatible, so we must not even instantiate freeInternal for them.
+fn freePopulatedFields(
+    comptime T: type,
+    comptime s: std.builtin.Type.Struct,
+    allocator: std.mem.Allocator,
+    result: *T,
+    owned: [s.fields.len]bool,
+) void {
+    inline for (s.fields, 0..) |field, i| {
+        const field_cfg = comptime getFieldConfig(T, field.name);
+        if (comptime field_cfg.unknown or field_cfg.skip) continue;
+        if (owned[i]) {
+            freeInternal(field.type, allocator, &@field(result.*, field.name));
+        }
+    }
 }
 
 /// Find the index of the unknown field (if any)
@@ -694,12 +764,26 @@ fn assignUnknownMembers(comptime T: type, ptr: *T, members: []Member, allocator:
     }
 }
 
+/// Maximum recursion depth when deep-cloning a caller-supplied Value tree during
+/// unknown-field capture (ASR-011 part 2). The JSON parser caps parsed trees at
+/// 256, but a caller can hand-build a deeper Value and feed it to a struct with an
+/// `unknown` field. This bound prevents unbounded recursion / stack overflow.
+const max_clone_depth: usize = 512;
+
+/// Error returned for deep-clone recursion is folded into the existing JsonParse
+/// variant to avoid widening the public UnmarshalError set.
+const CloneError = std.mem.Allocator.Error || error{JsonParse};
+
 /// Deep clone a Member (key and value)
-fn cloneMember(allocator: std.mem.Allocator, member: Member) std.mem.Allocator.Error!Member {
-    return .{
-        .k = try allocator.dupe(u8, member.k),
-        .v = try cloneValue(allocator, member.v),
-    };
+fn cloneMember(allocator: std.mem.Allocator, member: Member) CloneError!Member {
+    return cloneMemberDepth(allocator, member, 0);
+}
+
+fn cloneMemberDepth(allocator: std.mem.Allocator, member: Member, depth: usize) CloneError!Member {
+    const k = try allocator.dupe(u8, member.k);
+    errdefer allocator.free(k);
+    const v = try cloneValueDepth(allocator, member.v, depth);
+    return .{ .k = k, .v = v };
 }
 
 /// Free a cloned Value tree
@@ -732,7 +816,12 @@ fn freeClonedValue(allocator: std.mem.Allocator, value: Value) void {
 }
 
 /// Deep clone a Value tree
-fn cloneValue(allocator: std.mem.Allocator, value: Value) std.mem.Allocator.Error!Value {
+fn cloneValue(allocator: std.mem.Allocator, value: Value) CloneError!Value {
+    return cloneValueDepth(allocator, value, 0);
+}
+
+fn cloneValueDepth(allocator: std.mem.Allocator, value: Value, depth: usize) CloneError!Value {
+    if (depth >= max_clone_depth) return error.JsonParse;
     switch (value) {
         .null => return .null,
         .bool => |b| return .{ .bool = b },
@@ -756,15 +845,32 @@ fn cloneValue(allocator: std.mem.Allocator, value: Value) std.mem.Allocator.Erro
         .str => |s| return .{ .str = try allocator.dupe(u8, s) },
         .arr => |arr| {
             const items = try allocator.alloc(Value, arr.len);
+            // Free already-cloned siblings and the backing array if a deeper clone
+            // fails (e.g. depth bound hit) so partial clones never leak.
+            var built: usize = 0;
+            errdefer {
+                for (items[0..built]) |item| freeClonedValue(allocator, item);
+                allocator.free(items);
+            }
             for (arr, 0..) |item, i| {
-                items[i] = try cloneValue(allocator, item);
+                items[i] = try cloneValueDepth(allocator, item, depth + 1);
+                built = i + 1;
             }
             return .{ .arr = items };
         },
         .obj => |obj| {
             const members = try allocator.alloc(Member, obj.len);
+            var built: usize = 0;
+            errdefer {
+                for (members[0..built]) |m| {
+                    allocator.free(m.k);
+                    freeClonedValue(allocator, m.v);
+                }
+                allocator.free(members);
+            }
             for (obj, 0..) |m, i| {
-                members[i] = try cloneMember(allocator, m);
+                members[i] = try cloneMemberDepth(allocator, m, depth + 1);
+                built = i + 1;
             }
             return .{ .obj = members };
         },
@@ -904,6 +1010,10 @@ fn unmarshalStructWithPath(
 ) UnmarshalResult(T) {
     var result: T = undefined;
     var fields_found: [s.fields.len]bool = [_]bool{false} ** s.fields.len;
+    // Track owned fields so a later error frees the already-populated prefix
+    // (ASR-011). This function returns a result union (not an error union), so
+    // freeing must be done explicitly before every `.err` return.
+    var fields_owned: [s.fields.len]bool = [_]bool{false} ** s.fields.len;
 
     // Initialize inline struct fields first
     inline for (s.fields, 0..) |field, i| {
@@ -913,9 +1023,11 @@ fn unmarshalStructWithPath(
             if (ft_info == .@"struct") {
                 @field(result, field.name) = std.mem.zeroes(field.type);
                 fields_found[i] = true;
+                fields_owned[i] = true; // May accumulate owned memory across members
             } else if (ft_info == .optional) {
                 @field(result, field.name) = null;
                 fields_found[i] = true;
+                fields_owned[i] = true; // May accumulate owned memory across members
             }
         }
     }
@@ -935,10 +1047,14 @@ fn unmarshalStructWithPath(
                 switch (inline_result) {
                     .matched => matched = true,
                     .not_matched => {},
-                    .err => |e| return .{ .err = e },
+                    .err => |e| {
+                        freePopulatedFields(T, s, allocator, &result, fields_owned);
+                        return .{ .err = e };
+                    },
                 }
             } else if (matchFieldName(member.k, json_name, opts.match_case_insensitive)) {
                 const field_path = pointer.append(path, json_name, allocator) catch {
+                    freePopulatedFields(T, s, allocator, &result, fields_owned);
                     return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
                 };
                 defer allocator.free(field_path);
@@ -948,14 +1064,19 @@ fn unmarshalStructWithPath(
                     .ok => |v| {
                         @field(result, field.name) = v;
                         fields_found[i] = true;
+                        fields_owned[i] = true;
                         matched = true;
                     },
-                    .err => |e| return .{ .err = e },
+                    .err => |e| {
+                        freePopulatedFields(T, s, allocator, &result, fields_owned);
+                        return .{ .err = e };
+                    },
                 }
             }
         }
 
         if (!matched and !opts.ignore_unknown_fields) {
+            freePopulatedFields(T, s, allocator, &result, fields_owned);
             return .{ .err = makePathError(allocator, path, .unknown_field, "Unknown field", null, member.k) };
         }
     }
@@ -973,6 +1094,7 @@ fn unmarshalStructWithPath(
             } else if (@typeInfo(field.type) == .optional) {
                 @field(result, field.name) = null;
             } else {
+                freePopulatedFields(T, s, allocator, &result, fields_owned);
                 return .{ .err = makePathError(allocator, path, .missing_field, "Missing required field", field.name, null) };
             }
         }
@@ -1976,4 +2098,181 @@ test "unmarshal with StringHashMap unknown capture" {
     try std.testing.expect(result.extra.count() == 2);
     try std.testing.expect(result.extra.get("foo") != null);
     try std.testing.expect(result.extra.get("count") != null);
+}
+
+// ASR-011: error paths must not leak partially-built results.
+// These tests run under std.testing.allocator (leak-detecting) and deliberately
+// exercise OWNED memory (strings / slices) so that a failure after earlier fields
+// or elements succeeded would leak the already-populated prefix without the fix.
+
+test "ASR-011 struct: later field error frees earlier owned string field" {
+    // `name` (an owned []const u8) unmarshals first and succeeds; `age` then fails
+    // with a TypeMismatch. Without the errdefer free of populated fields, `name`
+    // leaks. With the fix, the error is returned and nothing leaks.
+    const Person = struct {
+        name: []const u8,
+        age: i32,
+    };
+
+    const result = unmarshal(Person, std.testing.allocator, "{\"name\": \"Alice\", \"age\": \"not a number\"}");
+    try std.testing.expectError(error.TypeMismatch, result);
+}
+
+test "ASR-011 struct: later field error frees earlier owned slice field" {
+    // `tags` (an owned [][]const u8) succeeds first; `count` then overflows.
+    const Record = struct {
+        tags: [][]const u8,
+        count: u8,
+    };
+
+    const result = unmarshal(Record, std.testing.allocator, "{\"tags\": [\"a\", \"bb\", \"ccc\"], \"count\": 99999}");
+    try std.testing.expectError(error.IntegerOverflow, result);
+}
+
+test "ASR-011 struct: inline-field owned memory freed when sibling field fails" {
+    // An inline struct field holds an owned string; populate it, then fail a later
+    // regular field. The inline field's owned memory must be freed (it is tracked
+    // as owned from initialization).
+    const Meta = struct {
+        label: []const u8,
+    };
+    const Doc = struct {
+        meta: Meta,
+        version: i32,
+
+        pub const json_config = .{
+            .meta = FieldConfig{ .@"inline" = true },
+        };
+    };
+
+    const input =
+        \\{"label":"hello","version":"oops"}
+    ;
+    const result = unmarshal(Doc, std.testing.allocator, input);
+    try std.testing.expectError(error.TypeMismatch, result);
+}
+
+test "ASR-011 struct: missing required field frees earlier owned fields" {
+    // `a` and `b` are owned strings that unmarshal successfully, then required
+    // field `c` is missing -> error.MissingField. Earlier owned fields must be freed.
+    const Required = struct {
+        a: []const u8,
+        b: []const u8,
+        c: []const u8,
+    };
+
+    const result = unmarshal(Required, std.testing.allocator, "{\"a\": \"x\", \"b\": \"y\"}");
+    try std.testing.expectError(error.MissingField, result);
+}
+
+test "ASR-011 slice: element error frees already-built owned elements" {
+    // A slice of owned strings: elements 0..N-1 succeed, element N is not a string.
+    const result = unmarshal([][]const u8, std.testing.allocator, "[\"one\", \"two\", 3]");
+    try std.testing.expectError(error.TypeMismatch, result);
+}
+
+test "ASR-011 slice of structs: element error frees built structs and spine" {
+    // Slice of structs each holding an owned string. The third element fails on its
+    // `age` field after its own `name` string was already duped, and after elements
+    // 0..1 were fully built. All owned memory must be freed.
+    const Person = struct {
+        name: []const u8,
+        age: i32,
+    };
+
+    const input =
+        \\[{"name":"a","age":1},{"name":"b","age":2},{"name":"c","age":"oops"}]
+    ;
+    const result = unmarshal([]Person, std.testing.allocator, input);
+    try std.testing.expectError(error.TypeMismatch, result);
+}
+
+test "ASR-011 fixed array: element error frees already-built owned elements" {
+    // Fixed-size array of owned strings; last element is not a string.
+    const result = unmarshal([3][]const u8, std.testing.allocator, "[\"one\", \"two\", 3]");
+    try std.testing.expectError(error.TypeMismatch, result);
+}
+
+test "ASR-011 WithPath struct: later field error frees earlier owned string field" {
+    // Same as the struct case but through the path-tracking dispatch tree.
+    const Person = struct {
+        name: []const u8,
+        age: i32,
+    };
+
+    const result = unmarshalWithInfo(Person, std.testing.allocator, "{\"name\": \"Alice\", \"age\": \"not a number\"}");
+    switch (result) {
+        .ok => try std.testing.expect(false),
+        .err => |err| {
+            defer if (err.path.len > 0) std.testing.allocator.free(err.path);
+            try std.testing.expect(err.kind == .type_mismatch);
+            try std.testing.expectEqualStrings("/age", err.path);
+        },
+    }
+}
+
+test "ASR-011 WithPath slice of structs: element error frees built structs and spine" {
+    const Person = struct {
+        name: []const u8,
+        age: i32,
+    };
+
+    const input =
+        \\[{"name":"a","age":1},{"name":"b","age":2},{"name":"c","age":"oops"}]
+    ;
+    const result = unmarshalWithInfo([]Person, std.testing.allocator, input);
+    switch (result) {
+        .ok => try std.testing.expect(false),
+        .err => |err| {
+            defer if (err.path.len > 0) std.testing.allocator.free(err.path);
+            try std.testing.expect(err.kind == .type_mismatch);
+            try std.testing.expectEqualStrings("/2/age", err.path);
+        },
+    }
+}
+
+test "ASR-011 depth bound: deeply nested caller-built unknown-capture tree is bounded" {
+    // The only runtime-data-driven (rather than comptime-type-driven) recursion
+    // reachable through the public API is the unknown-field deep clone
+    // (cloneValue / freeClonedValue). A caller can hand-build a Value tree deeper
+    // than the parser's 256 cap and feed it to a struct with an `unknown` field.
+    // Without a depth bound this overflows the stack; with the bound it returns a
+    // clean error and leaks nothing.
+    const allocator = std.testing.allocator;
+
+    const Config = struct {
+        name: []const u8,
+        extra: []Member,
+
+        pub const json_config = .{
+            .extra = FieldConfig{ .unknown = true },
+        };
+    };
+
+    // Build a deeply nested array Value: [[[ ... ]]] far deeper than 256.
+    const total_depth: usize = 4000;
+    var inner: Value = .{ .arr = &[_]Value{} };
+    var spines: std.ArrayList([]Value) = .empty;
+    defer {
+        // Free every array spine we allocated (inner-most slice is the static empty).
+        for (spines.items) |s| allocator.free(s);
+        spines.deinit(allocator);
+    }
+    var d: usize = 0;
+    while (d < total_depth) : (d += 1) {
+        const layer = try allocator.alloc(Value, 1);
+        layer[0] = inner;
+        try spines.append(allocator, layer);
+        inner = .{ .arr = layer };
+    }
+
+    // Object with a known field and one deeply-nested unknown field.
+    var members = [_]Member{
+        .{ .k = "name", .v = .{ .str = "app" } },
+        .{ .k = "deep", .v = inner },
+    };
+    const value: Value = .{ .obj = &members };
+
+    const result = fromValue(Config, allocator, value);
+    try std.testing.expectError(error.JsonParse, result);
 }
