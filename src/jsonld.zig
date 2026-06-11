@@ -860,6 +860,15 @@ pub const Processor = struct {
 
     fn createTermDefinition(self: *Self, context: *Context, term: []const u8, definition: json.Value) !void {
         var term_def = TermDefinition.init();
+        // Partial-build leak guard (NASR/OOM): the fields below (iri /
+        // type_mapping / language) are duped incrementally. If any later dupe --
+        // or the `key` dupe / `terms.put` at the end -- fails, free the
+        // already-duped fields. `TermDefinition.deinit` frees exactly those owned
+        // slices. errdefer does NOT fire on the early `.null`/`else` returns
+        // (those return normally), and on the success path ownership of
+        // `term_def` moves into the map before this scope exits, so the cleanup
+        // only runs on the OOM/error unwind.
+        errdefer term_def.deinit(self.allocator);
 
         switch (definition) {
             .null => {
@@ -912,6 +921,10 @@ pub const Processor = struct {
         }
 
         const key = try self.allocator.dupe(u8, term);
+        // If the map insertion fails, free the just-duped key (the `term_def`
+        // errdefer above frees its fields). On success, ownership of both `key`
+        // and `term_def` moves into the map.
+        errdefer self.allocator.free(key);
         try context.terms.put(key, term_def);
     }
 
@@ -2011,9 +2024,11 @@ fn importLoader(url: []const u8) ?json.Value {
 }
 
 test "GAP-009: @import is resolved and merged (not silently dropped)" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    // Use the leak-detecting testing allocator (no arena): the previous arena
+    // masked any per-allocation leak in the @import context merge/move path
+    // (createTermDefinition, processContext merge). Running raw guards those
+    // move/merge semantics -- every duped key/value must be owned and freed.
+    const allocator = std.testing.allocator;
 
     var processor = Processor.init(allocator, .{
         .document_loader = importLoader,
@@ -2208,4 +2223,61 @@ test "NQUAL-007: non-string @import returns ContextImportFailed (not dropped)" {
         Error.ContextImportFailed,
         processor.expand(.{ .obj = &doc_members }),
     );
+}
+
+// =============================================================================
+// NASR/OOM: createTermDefinition partial-build leak guard
+//
+// `createTermDefinition` dupes @id/@type/@language into a TermDefinition
+// incrementally, then dupes a key and inserts into the term map. Before the
+// errdefer fix, an allocation failure partway through leaked the already-duped
+// fields (and a failed map insert leaked the key). This test sweeps the
+// allocation fail index with std.testing.FailingAllocator over the
+// leak-detecting testing allocator: at every failure point the partial work
+// must be fully freed, so the testing allocator reports no leak.
+// =============================================================================
+
+test "NASR/OOM: createTermDefinition frees partial work on allocation failure (no leak)" {
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    // The full-object path dupes @id, @type, @language, then the key, then
+    // inserts (the map's first put also allocates its backing store), so a small
+    // sweep covers every allocation in the build.
+    while (fail_index < 24) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        const fa = failing.allocator();
+
+        // Processor/Context init perform no allocation until first map insert,
+        // so they are safe to build directly on the failing allocator.
+        var processor = Processor.init(fa, .{});
+        defer processor.deinit();
+
+        var context = Context.init(fa);
+        defer context.deinit();
+
+        // A full @id/@type/@language object definition exercises every
+        // incremental dupe in the build path.
+        var def_members = [_]json.Member{
+            .{ .k = Keywords.id, .v = .{ .str = "http://example.org/term" } },
+            .{ .k = Keywords.type_kw, .v = .{ .str = "@id" } },
+            .{ .k = Keywords.language, .v = .{ .str = "en" } },
+        };
+
+        const res = processor.createTermDefinition(&context, "myTerm", .{ .obj = &def_members });
+        if (res) |_| {
+            // Build completed before the fail index: term owned by `context`,
+            // freed by context.deinit(). Nothing else to do.
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+            // On the error path the partial fields must already be freed by the
+            // errdefer; context holds no term for "myTerm". The testing allocator
+            // (backing `failing`) will fail this test at teardown if anything
+            // duped before the failure leaked.
+        }
+    }
+    // Prove the sweep actually exercised at least one OOM unwind.
+    try std.testing.expect(saw_oom);
 }

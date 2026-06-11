@@ -28,6 +28,24 @@ const CompiledSchema = json.CompiledSchema;
 const ValidationError = json.ValidationError;
 const ValidationReport = json.ValidationReport;
 
+/// Defense-in-depth structural recursion cap for schema compilation and
+/// validation. This is SEPARATE from the `$ref`-traversal depth (bounded by
+/// `SchemaOptions.max_ref_depth`): it bounds how deep the *structural* keyword
+/// nesting (`properties`/`items`/`allOf`/`anyOf`/`$defs`/...) may recurse.
+///
+/// For schemas produced by `json.parse` this can never be hit -- the parser
+/// caps JSON nesting at `max_depth` (256 by default), and a schema's structural
+/// depth is bounded by its parsed nesting depth. The cap exists only to keep a
+/// caller that hand-builds a pathologically deep schema `Document`/`Value` tree
+/// (or a deeply nested instance) from overflowing the native stack: such input
+/// now returns a clean error (`.SchemaLimit` at compile time, a fail-closed
+/// validation error at validate time) instead of crashing.
+///
+/// It is intentionally generous (>= the parser's default `max_depth=256`) so it
+/// NEVER affects real, parsed schemas. Kept as a module constant rather than a
+/// `SchemaOptions` field to avoid changing the shared `json.SchemaOptions` ABI.
+const max_schema_depth: u16 = 512;
+
 pub const SchemaNode = struct {
     location: []const u8,
     /// The resolved base URI for this schema (from nearest $id ancestor)
@@ -99,7 +117,7 @@ pub fn compile(a: std.mem.Allocator, doc: *const Document, opts: SchemaOptions, 
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    const root = try compileNode(alloc, doc.root, "", opts, err);
+    const root = try compileNode(alloc, doc.root, "", opts, err, 0);
 
     var anchors = std.StringHashMap(*SchemaNode).init(alloc);
     var dynamic_anchors = std.StringHashMap(*SchemaNode).init(alloc);
@@ -182,7 +200,7 @@ fn resolveExternalRef(
     const ext_doc = json.parse(alloc, schema_json, .{}, &parse_err) catch return;
 
     // Compile the external schema
-    const ext_root = compileNode(alloc, ext_doc.root, "", opts, err) catch return;
+    const ext_root = compileNode(alloc, ext_doc.root, "", opts, err, 0) catch return;
 
     // Collect identifiers from the external schema
     try collectIdentifiers(alloc, ext_root, uri_base, anchors, dynamic_anchors, id_registry);
@@ -353,7 +371,16 @@ fn resolveIdUri(alloc: std.mem.Allocator, base: []const u8, id: []const u8) ![]c
     };
 }
 
-fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: SchemaOptions, err: *ParseError) !*SchemaNode {
+fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: SchemaOptions, err: *ParseError, sdepth: u16) !*SchemaNode {
+    // Defense-in-depth (NQUAL): bound the STRUCTURAL recursion depth so a
+    // hand-built, pathologically deep schema tree fails compilation cleanly
+    // rather than overflowing the native stack. Parsed schemas can never reach
+    // this because the parser caps nesting well below `max_schema_depth`.
+    if (sdepth > max_schema_depth) {
+        err.* = .{ .code = .SchemaLimit, .line = 1, .col = 1, .offset = 0 };
+        return error.JsonParse;
+    }
+
     const node = try a.create(SchemaNode);
     node.* = .{ .location = try a.dupe(u8, location) };
 
@@ -418,19 +445,19 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                     if (m.v == .bool) node.unique_items = m.v.bool;
                 } else if (std.mem.eql(u8, m.k, "items")) {
                     const loc = try pointer.append(location, "items", a);
-                    node.items = try compileNode(a, m.v, loc, opts, err);
+                    node.items = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "prefixItems")) {
                     if (m.v == .arr) {
                         var prefix: std.ArrayList(*SchemaNode) = .empty;
                         for (m.v.arr, 0..) |item, i| {
                             const loc = try pointer.appendIndex(location, i, a);
-                            try prefix.append(a, try compileNode(a, item, loc, opts, err));
+                            try prefix.append(a, try compileNode(a, item, loc, opts, err, sdepth + 1));
                         }
                         node.prefix_items = try prefix.toOwnedSlice(a);
                     }
                 } else if (std.mem.eql(u8, m.k, "contains")) {
                     const loc = try pointer.append(location, "contains", a);
-                    node.contains = try compileNode(a, m.v, loc, opts, err);
+                    node.contains = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "minContains")) {
                     if (m.v == .num) node.min_contains = parseIntKeyword(m.v.num);
                 } else if (std.mem.eql(u8, m.k, "maxContains")) {
@@ -452,7 +479,7 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                         var props = std.StringHashMap(*SchemaNode).init(a);
                         for (m.v.obj) |prop| {
                             const loc = try std.fmt.allocPrint(a, "{s}/properties/{s}", .{ location, prop.k });
-                            try props.put(try a.dupe(u8, prop.k), try compileNode(a, prop.v, loc, opts, err));
+                            try props.put(try a.dupe(u8, prop.k), try compileNode(a, prop.v, loc, opts, err, sdepth + 1));
                         }
                         node.properties = props;
                     }
@@ -472,17 +499,17 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                             const loc = try pointer.append(location, prop.k, a);
                             try patterns.append(a, .{
                                 .pattern = re,
-                                .schema = try compileNode(a, prop.v, loc, opts, err),
+                                .schema = try compileNode(a, prop.v, loc, opts, err, sdepth + 1),
                             });
                         }
                         node.pattern_properties = try patterns.toOwnedSlice(a);
                     }
                 } else if (std.mem.eql(u8, m.k, "additionalProperties")) {
                     const loc = try pointer.append(location, "additionalProperties", a);
-                    node.additional_properties = try compileNode(a, m.v, loc, opts, err);
+                    node.additional_properties = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "propertyNames")) {
                     const loc = try pointer.append(location, "propertyNames", a);
-                    node.property_names = try compileNode(a, m.v, loc, opts, err);
+                    node.property_names = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "dependentRequired")) {
                     if (m.v == .obj) {
                         var dep_req = std.StringHashMap([]const []const u8).init(a);
@@ -502,7 +529,7 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                         var dep_sch = std.StringHashMap(*SchemaNode).init(a);
                         for (m.v.obj) |dep| {
                             const loc = try pointer.append(location, dep.k, a);
-                            try dep_sch.put(try a.dupe(u8, dep.k), try compileNode(a, dep.v, loc, opts, err));
+                            try dep_sch.put(try a.dupe(u8, dep.k), try compileNode(a, dep.v, loc, opts, err, sdepth + 1));
                         }
                         node.dependent_schemas = dep_sch;
                     }
@@ -511,7 +538,7 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                         var schemas: std.ArrayList(*SchemaNode) = .empty;
                         for (m.v.arr, 0..) |s, i| {
                             const loc = try pointer.appendIndex(location, i, a);
-                            try schemas.append(a, try compileNode(a, s, loc, opts, err));
+                            try schemas.append(a, try compileNode(a, s, loc, opts, err, sdepth + 1));
                         }
                         node.all_of = try schemas.toOwnedSlice(a);
                     }
@@ -520,7 +547,7 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                         var schemas: std.ArrayList(*SchemaNode) = .empty;
                         for (m.v.arr, 0..) |s, i| {
                             const loc = try pointer.appendIndex(location, i, a);
-                            try schemas.append(a, try compileNode(a, s, loc, opts, err));
+                            try schemas.append(a, try compileNode(a, s, loc, opts, err, sdepth + 1));
                         }
                         node.any_of = try schemas.toOwnedSlice(a);
                     }
@@ -529,34 +556,34 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                         var schemas: std.ArrayList(*SchemaNode) = .empty;
                         for (m.v.arr, 0..) |s, i| {
                             const loc = try pointer.appendIndex(location, i, a);
-                            try schemas.append(a, try compileNode(a, s, loc, opts, err));
+                            try schemas.append(a, try compileNode(a, s, loc, opts, err, sdepth + 1));
                         }
                         node.one_of = try schemas.toOwnedSlice(a);
                     }
                 } else if (std.mem.eql(u8, m.k, "not")) {
                     const loc = try pointer.append(location, "not", a);
-                    node.not = try compileNode(a, m.v, loc, opts, err);
+                    node.not = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "if")) {
                     const loc = try pointer.append(location, "if", a);
-                    node.if_schema = try compileNode(a, m.v, loc, opts, err);
+                    node.if_schema = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "then")) {
                     const loc = try pointer.append(location, "then", a);
-                    node.then_schema = try compileNode(a, m.v, loc, opts, err);
+                    node.then_schema = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "else")) {
                     const loc = try pointer.append(location, "else", a);
-                    node.else_schema = try compileNode(a, m.v, loc, opts, err);
+                    node.else_schema = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "unevaluatedItems")) {
                     const loc = try pointer.append(location, "unevaluatedItems", a);
-                    node.unevaluated_items = try compileNode(a, m.v, loc, opts, err);
+                    node.unevaluated_items = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "unevaluatedProperties")) {
                     const loc = try pointer.append(location, "unevaluatedProperties", a);
-                    node.unevaluated_properties = try compileNode(a, m.v, loc, opts, err);
+                    node.unevaluated_properties = try compileNode(a, m.v, loc, opts, err, sdepth + 1);
                 } else if (std.mem.eql(u8, m.k, "$defs")) {
                     if (m.v == .obj) {
                         var defs = std.StringHashMap(*SchemaNode).init(a);
                         for (m.v.obj) |def| {
                             const loc = try std.fmt.allocPrint(a, "{s}/$defs/{s}", .{ location, def.k });
-                            try defs.put(try a.dupe(u8, def.k), try compileNode(a, def.v, loc, opts, err));
+                            try defs.put(try a.dupe(u8, def.k), try compileNode(a, def.v, loc, opts, err, sdepth + 1));
                         }
                         node.defs = defs;
                     }
@@ -762,7 +789,7 @@ pub fn validate(a: std.mem.Allocator, sch: *const CompiledSchema, inst: Value, o
     var ctx = ValidationContext.init(a, sch, opts);
     errdefer ctx.deinit();
 
-    try validateNode(&ctx, inst, sch.root, "", 0);
+    try validateNode(&ctx, inst, sch.root, "", 0, 0);
 
     const errors = try ctx.errors.toOwnedSlice(a);
 
@@ -1105,7 +1132,21 @@ fn navigateSchema(node: *const SchemaNode, segment: []const u8) ?*const SchemaNo
     return null;
 }
 
-fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, inst_ptr: []const u8, depth: u16) !void {
+fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, inst_ptr: []const u8, depth: u16, sdepth: u16) !void {
+    // Defense-in-depth (NQUAL): bound the TOTAL structural recursion depth
+    // (every nested validateNode call -- structural keywords AND $ref hops)
+    // separately from the `$ref`-only `depth` counter below. A caller that
+    // hand-builds a pathologically deep schema or instance tree could otherwise
+    // overflow the native stack during validation. Like the $ref-depth case,
+    // this FAILS CLOSED: it records a validation error (so `valid` becomes
+    // false) rather than silently returning, which would be a fail-open bypass.
+    // Parsed schemas/instances can never reach this (parser nesting cap is well
+    // below `max_schema_depth`).
+    if (sdepth > max_schema_depth) {
+        try ctx.addError(inst_ptr, node.location, "maxDepth", "SchemaLimit: schema/instance structural depth exceeded max_schema_depth");
+        return;
+    }
+
     // ASR-021 / GAP-002: $ref-depth exceed must FAIL CLOSED on this enforcement
     // boundary. A bare `return` here reported the instance as VALID once a $ref
     // chain (e.g. a self-referential {"$ref":"#"}) exceeded max_ref_depth, which
@@ -1129,14 +1170,14 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
     // Handle $ref (using cached resolution)
     if (node.ref) |ref| {
         if (ctx.getCachedRef(ref, node.base_uri)) |ref_node| {
-            try validateNode(ctx, inst, ref_node, inst_ptr, depth + 1);
+            try validateNode(ctx, inst, ref_node, inst_ptr, depth + 1, sdepth + 1);
         }
     }
 
     // Handle $dynamicRef (using cached resolution)
     if (node.dynamic_ref) |dref| {
         if (ctx.getCachedDynamicRef(dref, node.base_uri)) |ref_node| {
-            try validateNode(ctx, inst, ref_node, inst_ptr, depth + 1);
+            try validateNode(ctx, inst, ref_node, inst_ptr, depth + 1, sdepth + 1);
         }
     }
 
@@ -1283,7 +1324,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
             for (prefix, 0..) |schema, i| {
                 if (i < arr.len) {
                     const item_ptr = try ctx.allocIdxPtr(inst_ptr, i);
-                    try validateNode(ctx, arr[i], schema, item_ptr, depth);
+                    try validateNode(ctx, arr[i], schema, item_ptr, depth, sdepth + 1);
                     try ctx.evaluated_items.put(i, {});
                 }
             }
@@ -1294,7 +1335,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
             if (prefix_len < arr.len) {
                 for (arr[prefix_len..], prefix_len..) |item, i| {
                     const item_ptr = try ctx.allocIdxPtr(inst_ptr, i);
-                    try validateNode(ctx, item, items_schema, item_ptr, depth);
+                    try validateNode(ctx, item, items_schema, item_ptr, depth, sdepth + 1);
                     try ctx.evaluated_items.put(i, {});
                 }
             }
@@ -1306,7 +1347,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
             for (arr, 0..) |item, i| {
                 var sub_ctx = ValidationContext.init(ctx.allocator, ctx.schema, ctx.opts);
                 defer sub_ctx.deinit();
-                validateNode(&sub_ctx, item, contains_schema, "", depth) catch continue;
+                validateNode(&sub_ctx, item, contains_schema, "", depth, sdepth + 1) catch continue;
                 if (sub_ctx.errors.items.len == 0) {
                     count += 1;
                     try ctx.evaluated_items.put(i, {});
@@ -1362,7 +1403,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
             for (obj) |m| {
                 if (properties.get(m.k)) |prop_schema| {
                     const prop_ptr = try ctx.allocPtr(inst_ptr, m.k);
-                    try validateNode(ctx, m.v, prop_schema, prop_ptr, depth);
+                    try validateNode(ctx, m.v, prop_schema, prop_ptr, depth, sdepth + 1);
                     try ctx.evaluated_props.put(m.k, {});
                 }
             }
@@ -1375,7 +1416,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
                     const matches = pp.pattern.match(ctx.allocator, m.k, ctx.opts.regex_max_steps) catch false;
                     if (matches) {
                         const prop_ptr = try ctx.allocPtr(inst_ptr, m.k);
-                        try validateNode(ctx, m.v, pp.schema, prop_ptr, depth);
+                        try validateNode(ctx, m.v, pp.schema, prop_ptr, depth, sdepth + 1);
                         try ctx.evaluated_props.put(m.k, {});
                     }
                 }
@@ -1402,7 +1443,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
 
                 if (!covered) {
                     const prop_ptr = try ctx.allocPtr(inst_ptr, m.k);
-                    try validateNode(ctx, m.v, ap_schema, prop_ptr, depth);
+                    try validateNode(ctx, m.v, ap_schema, prop_ptr, depth, sdepth + 1);
                     try ctx.evaluated_props.put(m.k, {});
                 }
             }
@@ -1411,7 +1452,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         // Property names
         if (node.property_names) |pn_schema| {
             for (obj) |m| {
-                try validateNode(ctx, .{ .str = m.k }, pn_schema, inst_ptr, depth);
+                try validateNode(ctx, .{ .str = m.k }, pn_schema, inst_ptr, depth, sdepth + 1);
             }
         }
 
@@ -1439,7 +1480,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         if (node.dependent_schemas) |dep_sch| {
             for (obj) |m| {
                 if (dep_sch.get(m.k)) |schema| {
-                    try validateNode(ctx, inst, schema, inst_ptr, depth);
+                    try validateNode(ctx, inst, schema, inst_ptr, depth, sdepth + 1);
                 }
             }
         }
@@ -1448,7 +1489,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
     // allOf
     if (node.all_of) |schemas| {
         for (schemas) |schema| {
-            try validateNode(ctx, inst, schema, inst_ptr, depth);
+            try validateNode(ctx, inst, schema, inst_ptr, depth, sdepth + 1);
         }
     }
 
@@ -1458,7 +1499,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         for (schemas) |schema| {
             var sub_ctx = ValidationContext.init(ctx.allocator, ctx.schema, ctx.opts);
             defer sub_ctx.deinit();
-            validateNode(&sub_ctx, inst, schema, inst_ptr, depth) catch continue;
+            validateNode(&sub_ctx, inst, schema, inst_ptr, depth, sdepth + 1) catch continue;
             if (sub_ctx.errors.items.len == 0) {
                 valid = true;
                 // Merge evaluated tracking from successful branch
@@ -1488,7 +1529,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         for (schemas) |schema| {
             var sub_ctx = ValidationContext.init(ctx.allocator, ctx.schema, ctx.opts);
             defer sub_ctx.deinit();
-            validateNode(&sub_ctx, inst, schema, inst_ptr, depth) catch continue;
+            validateNode(&sub_ctx, inst, schema, inst_ptr, depth, sdepth + 1) catch continue;
             if (sub_ctx.errors.items.len == 0) {
                 valid_count += 1;
                 if (valid_count == 1) {
@@ -1523,7 +1564,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
     if (node.not) |not_schema| {
         var sub_ctx = ValidationContext.init(ctx.allocator, ctx.schema, ctx.opts);
         defer sub_ctx.deinit();
-        validateNode(&sub_ctx, inst, not_schema, inst_ptr, depth) catch {};
+        validateNode(&sub_ctx, inst, not_schema, inst_ptr, depth, sdepth + 1) catch {};
         if (sub_ctx.errors.items.len == 0) {
             try ctx.addError(inst_ptr, node.location, "not", "must not match");
         }
@@ -1533,7 +1574,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
     if (node.if_schema) |if_sch| {
         var sub_ctx = ValidationContext.init(ctx.allocator, ctx.schema, ctx.opts);
         defer sub_ctx.deinit();
-        validateNode(&sub_ctx, inst, if_sch, inst_ptr, depth) catch {};
+        validateNode(&sub_ctx, inst, if_sch, inst_ptr, depth, sdepth + 1) catch {};
 
         // Merge evaluated tracking from if branch (regardless of result)
         var prop_it = sub_ctx.evaluated_props.keyIterator();
@@ -1547,11 +1588,11 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
 
         if (sub_ctx.errors.items.len == 0) {
             if (node.then_schema) |then_sch| {
-                try validateNode(ctx, inst, then_sch, inst_ptr, depth);
+                try validateNode(ctx, inst, then_sch, inst_ptr, depth, sdepth + 1);
             }
         } else {
             if (node.else_schema) |else_sch| {
-                try validateNode(ctx, inst, else_sch, inst_ptr, depth);
+                try validateNode(ctx, inst, else_sch, inst_ptr, depth, sdepth + 1);
             }
         }
     }
@@ -1562,7 +1603,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         for (obj) |m| {
             if (!ctx.evaluated_props.contains(m.k)) {
                 const prop_ptr = try ctx.allocPtr(inst_ptr, m.k);
-                try validateNode(ctx, m.v, node.unevaluated_properties.?, prop_ptr, depth);
+                try validateNode(ctx, m.v, node.unevaluated_properties.?, prop_ptr, depth, sdepth + 1);
             }
         }
     }
@@ -1573,7 +1614,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         for (arr, 0..) |item, i| {
             if (!ctx.evaluated_items.contains(i)) {
                 const item_ptr = try ctx.allocIdxPtr(inst_ptr, i);
-                try validateNode(ctx, item, node.unevaluated_items.?, item_ptr, depth);
+                try validateNode(ctx, item, node.unevaluated_items.?, item_ptr, depth, sdepth + 1);
             }
         }
     }
@@ -2100,4 +2141,156 @@ test "QUAL-015: plain integer keyword unchanged" {
 
     try std.testing.expectEqual(@as(?u64, 3), compiled.root.min_items);
     try std.testing.expectEqual(@as(?u64, 5), compiled.root.max_items);
+}
+
+// =============================================================================
+// NQUAL: structural recursion cap (defense-in-depth)
+//
+// `compileNode` / `validateNode` recurse over structural keywords
+// (`properties`/`items`/`allOf`/...). The existing `depth` param only bounds
+// `$ref` traversal, so a caller that hand-builds a pathologically deep schema
+// `Value` tree (bypassing the parser's nesting cap) could overflow the native
+// stack. The structural cap (`max_schema_depth`) makes such input fail cleanly:
+// a compile error at compile time, a fail-closed validation error at validate
+// time. These tests build trees DEEPER than the cap with the leak-detecting
+// testing allocator (and free them themselves) to prove no crash and no leak.
+// =============================================================================
+
+/// Build a `levels`-deep nested `{"properties":{"x": <deeper>}}` schema Value
+/// tree, all strings/containers duped from `allocator`. Innermost value is an
+/// empty object schema `{}`. Each nesting level costs exactly one extra
+/// `compileNode` recursion. Free with `freeSchemaValue(allocator, ...)`.
+fn buildDeepPropertiesSchema(allocator: std.mem.Allocator, levels: usize) !Value {
+    var current: Value = .{ .obj = try allocator.alloc(Member, 0) };
+    var i: usize = 0;
+    while (i < levels) : (i += 1) {
+        const inner = try allocator.alloc(Member, 1);
+        inner[0] = .{ .k = try allocator.dupe(u8, "x"), .v = current };
+        const outer = try allocator.alloc(Member, 1);
+        outer[0] = .{ .k = try allocator.dupe(u8, "properties"), .v = .{ .obj = inner } };
+        current = .{ .obj = outer };
+    }
+    return current;
+}
+
+/// Recursively free a hand-built schema Value tree (mirror of the builders
+/// above): frees duped keys, arrays, and object member slices.
+fn freeSchemaValue(allocator: std.mem.Allocator, v: Value) void {
+    switch (v) {
+        .str => |s| allocator.free(s),
+        .arr => |arr| {
+            for (arr) |item| freeSchemaValue(allocator, item);
+            allocator.free(arr);
+        },
+        .obj => |obj| {
+            for (obj) |m| {
+                allocator.free(m.k);
+                freeSchemaValue(allocator, m.v);
+            }
+            allocator.free(obj);
+        },
+        else => {},
+    }
+}
+
+test "NQUAL: compile of schema deeper than max_schema_depth returns SchemaLimit (no crash)" {
+    const allocator = std.testing.allocator;
+
+    // Deeper than the structural cap so compileNode trips the guard mid-recursion.
+    const deep_root = try buildDeepPropertiesSchema(allocator, max_schema_depth + 50);
+    defer freeSchemaValue(allocator, deep_root);
+
+    // Wrap in a Document with a throwaway arena (compile doesn't touch the
+    // document arena; the root Value is the only thing read).
+    var doc = json.Document{
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .root = deep_root,
+    };
+    defer doc.arena.deinit();
+
+    var err = json.ParseError.init();
+    const result = compile(allocator, &doc, .{}, null, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(json.ErrorCode.SchemaLimit, err.code);
+}
+
+test "NQUAL: schema within max_schema_depth compiles and validates normally" {
+    const allocator = std.testing.allocator;
+
+    // Comfortably within the cap: must compile AND validate cleanly. This proves
+    // the cap never affects legitimate (even fairly deep) schemas.
+    const deep_root = try buildDeepPropertiesSchema(allocator, 100);
+    defer freeSchemaValue(allocator, deep_root);
+
+    var doc = json.Document{
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .root = deep_root,
+    };
+    defer doc.arena.deinit();
+
+    var err = json.ParseError.init();
+    var compiled = try compile(allocator, &doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // A matching nested instance validates without error.
+    const inst_json = "{\"x\":{\"x\":{\"x\":{}}}}";
+    var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+    defer inst_doc.deinit();
+
+    const result = try validate(allocator, &compiled, inst_doc.root, .{});
+    defer freeReport(allocator, result);
+    try std.testing.expect(result.ok);
+}
+
+test "NQUAL: validation structural depth over max_schema_depth fails closed (no crash)" {
+    const allocator = std.testing.allocator;
+
+    // A self-referential schema `{"properties":{"x":{"$ref":"#"}}}` compiles
+    // shallow (a couple of nodes) but validates as deep as the *instance*. Per
+    // instance level the validator does a `properties` descent (sdepth+1) AND a
+    // `$ref` hop (sdepth+1, depth+1) -- so the STRUCTURAL counter (sdepth) grows
+    // ~2x as fast as the `$ref` counter (depth). With `max_ref_depth` raised well
+    // above the structural cap, the structural guard (`sdepth > max_schema_depth`)
+    // trips FIRST, exercising the new fail-closed branch independently of the
+    // pre-existing ref-depth guard. A deep instance drives it past the cap.
+    const schema_json = "{\"properties\":{\"x\":{\"$ref\":\"#\"}}}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // Build a deep `{"x":{"x":{...}}}` instance: ~2 structural recursions per
+    // level, so > max_schema_depth/2 levels guarantees sdepth exceeds the cap.
+    const inst_root = try buildDeepXInstance(allocator, max_schema_depth);
+    defer freeSchemaValue(allocator, inst_root);
+
+    // Raise the ref-depth cap above the structural cap so the structural guard
+    // is the one that trips.
+    const opts = SchemaOptions{ .max_ref_depth = max_schema_depth * 4, .max_errors = 8 };
+    const result = try validate(allocator, &compiled, inst_root, opts);
+    defer freeReport(allocator, result);
+
+    // Fail-closed: the report MUST be invalid (not silently valid), and the
+    // SchemaLimit structural-depth error MUST be present.
+    try std.testing.expect(!result.ok);
+    var found = false;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e.message, "SchemaLimit") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+/// Build a `levels`-deep nested `{"x":{"x": ... {"x": null} ... }}` instance
+/// Value tree. Free with `freeSchemaValue(allocator, ...)`.
+fn buildDeepXInstance(allocator: std.mem.Allocator, levels: usize) !Value {
+    var current: Value = .null;
+    var i: usize = 0;
+    while (i < levels) : (i += 1) {
+        const members = try allocator.alloc(Member, 1);
+        members[0] = .{ .k = try allocator.dupe(u8, "x"), .v = current };
+        current = .{ .obj = members };
+    }
+    return current;
 }
