@@ -127,6 +127,11 @@ pub const CborError = error{
     IntegerOverflow,
     UnsupportedTag,
     InvalidFloat,
+    /// Wire-declared length exceeds what the remaining input can possibly
+    /// supply (e.g. a definite-length array/map header claiming far more
+    /// items than there are bytes left). Guards against unbounded
+    /// pre-allocation from an attacker-controlled length prefix.
+    InvalidLength,
     OutOfMemory,
 };
 
@@ -464,12 +469,20 @@ pub const Decoder = struct {
     }
 
     fn readBytes(self: *Self, count: usize) ![]const u8 {
-        if (self.pos + count > self.data.len) {
+        // Non-wrapping bounds check: `self.pos + count` can overflow when
+        // `count` is attacker-controlled and large (see ASR-018). Confirm
+        // `pos <= len` first, then compare against the remaining budget.
+        if (self.pos > self.data.len or count > self.data.len - self.pos) {
             return error.UnexpectedEof;
         }
         const result = self.data[self.pos..][0..count];
         self.pos += count;
         return result;
+    }
+
+    /// Number of unconsumed bytes remaining in the input.
+    fn remaining(self: *Self) usize {
+        return if (self.pos <= self.data.len) self.data.len - self.pos else 0;
     }
 
     fn readArgument(self: *Self, additional: u5) !u64 {
@@ -633,14 +646,34 @@ pub const Decoder = struct {
             return self.decodeIndefiniteArray();
         }
 
-        const items = try self.allocator.alloc(json.Value, @intCast(length));
-        errdefer self.allocator.free(items);
-
-        for (items) |*item| {
-            item.* = try self.decodeValue();
+        // ASR-004: Reject a wire-declared length that cannot possibly be
+        // satisfied by the remaining input. Every array element occupies at
+        // least one byte, so a `length` larger than the bytes left is a lie
+        // and would otherwise force a huge pre-allocation. Grow an ArrayList
+        // as elements are actually decoded rather than pre-allocating from
+        // the (attacker-controlled) prefix.
+        if (length > self.remaining()) {
+            return error.InvalidLength;
         }
 
-        return .{ .arr = items };
+        // ASR-012: free already-decoded elements on a late error.
+        var items: std.ArrayList(json.Value) = .empty;
+        errdefer {
+            for (items.items) |item| {
+                freeValue(self.allocator, item);
+            }
+            items.deinit(self.allocator);
+        }
+
+        try items.ensureTotalCapacityPrecise(self.allocator, @intCast(length));
+
+        var i: u64 = 0;
+        while (i < length) : (i += 1) {
+            const item = try self.decodeValue();
+            items.appendAssumeCapacity(item);
+        }
+
+        return .{ .arr = try items.toOwnedSlice(self.allocator) };
     }
 
     fn decodeIndefiniteArray(self: *Self) !json.Value {
@@ -680,20 +713,42 @@ pub const Decoder = struct {
             return self.decodeIndefiniteMap();
         }
 
-        const members = try self.allocator.alloc(json.Member, @intCast(length));
-        errdefer self.allocator.free(members);
+        // ASR-004: Each map pair occupies at least two bytes (a key item and
+        // a value item), so a `length` larger than half the remaining input
+        // is impossible. Reject before allocating to prevent unbounded
+        // pre-allocation from the wire-declared length prefix.
+        if (length > self.remaining() / 2) {
+            return error.InvalidLength;
+        }
 
-        for (members) |*member| {
+        // ASR-012: free already-decoded members (and any dangling key) on a
+        // late error.
+        var members: std.ArrayList(json.Member) = .empty;
+        errdefer {
+            for (members.items) |m| {
+                self.allocator.free(m.k);
+                freeValue(self.allocator, m.v);
+            }
+            members.deinit(self.allocator);
+        }
+
+        try members.ensureTotalCapacityPrecise(self.allocator, @intCast(length));
+
+        var i: u64 = 0;
+        while (i < length) : (i += 1) {
             const key = try self.decodeValue();
             if (key != .str) {
                 freeValue(self.allocator, key);
                 return error.InvalidMajorType;
             }
-            member.k = key.str;
-            member.v = try self.decodeValue();
+            // Ensure the key is freed if decoding the value fails.
+            errdefer self.allocator.free(key.str);
+
+            const value = try self.decodeValue();
+            members.appendAssumeCapacity(.{ .k = key.str, .v = value });
         }
 
-        return .{ .obj = members };
+        return .{ .obj = try members.toOwnedSlice(self.allocator) };
     }
 
     fn decodeIndefiniteMap(self: *Self) !json.Value {
@@ -760,57 +815,69 @@ pub const Decoder = struct {
                 const bits = std.mem.bigToNative(u16, @bitCast(bytes[0..2].*));
                 const f16_val: f16 = @bitCast(bits);
                 const f64_val: f64 = f16_val;
-                return self.floatToValue(f64_val);
+                return floatToValue(self.allocator, f64_val);
             },
             26 => {
                 // Single-precision float
                 const bytes = try self.readBytes(4);
                 const bits = std.mem.bigToNative(u32, @bitCast(bytes[0..4].*));
                 const f32_val: f32 = @bitCast(bits);
-                return self.floatToValue(f32_val);
+                return floatToValue(self.allocator, f32_val);
             },
             27 => {
                 // Double-precision float
                 const bytes = try self.readBytes(8);
                 const bits = std.mem.bigToNative(u64, @bitCast(bytes[0..8].*));
                 const f64_val: f64 = @bitCast(bits);
-                return self.floatToValue(f64_val);
+                return floatToValue(self.allocator, f64_val);
             },
             31 => return error.UnexpectedBreak,
             else => return error.InvalidSimpleValue,
         }
-    }
-
-    fn floatToValue(self: *Self, value: anytype) !json.Value {
-        const f64_val: f64 = @floatCast(value);
-
-        // Handle special values
-        if (std.math.isNan(f64_val)) {
-            return .{ .num = .{ .lexeme = "NaN", .sign = 1, .digits = "NaN", .exp10 = 0 } };
-        } else if (std.math.isInf(f64_val)) {
-            if (f64_val < 0) {
-                return .{ .num = .{ .lexeme = "-Infinity", .sign = -1, .digits = "Infinity", .exp10 = 0 } };
-            }
-            return .{ .num = .{ .lexeme = "Infinity", .sign = 1, .digits = "Infinity", .exp10 = 0 } };
-        }
-
-        var buf: [32]u8 = undefined;
-        const formatted = std.fmt.bufPrint(&buf, "{d}", .{f64_val}) catch {
-            return error.InvalidFloat;
-        };
-        const lexeme = try self.allocator.dupe(u8, formatted);
-        return .{ .num = .{
-            .lexeme = lexeme,
-            .sign = if (f64_val < 0) @as(i8, -1) else @as(i8, 1),
-            .digits = lexeme,
-            .exp10 = 0,
-        } };
     }
 };
 
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+/// Convert a decoded CBOR float into a JSON number value.
+///
+/// Handles the NaN / +Infinity / -Infinity special cases (which `{d}`
+/// formatting cannot round-trip into a valid JSON number lexeme) before
+/// falling back to decimal formatting. Shared by both the non-streaming
+/// `Decoder` and the `StreamingDecoder` so the two produce identical output
+/// for the same bytes (QUAL-017).
+fn floatToValue(allocator: std.mem.Allocator, value: anytype) CborError!json.Value {
+    const f64_val: f64 = @floatCast(value);
+
+    // Handle special values. The lexeme is heap-allocated like every other
+    // decoded number so that freeValue() can free it uniformly -- returning a
+    // string literal here would make freeValue() perform an invalid free.
+    if (std.math.isNan(f64_val)) {
+        const lexeme = try allocator.dupe(u8, "NaN");
+        return .{ .num = .{ .lexeme = lexeme, .sign = 1, .digits = lexeme, .exp10 = 0 } };
+    } else if (std.math.isInf(f64_val)) {
+        if (f64_val < 0) {
+            const lexeme = try allocator.dupe(u8, "-Infinity");
+            return .{ .num = .{ .lexeme = lexeme, .sign = -1, .digits = lexeme[1..], .exp10 = 0 } };
+        }
+        const lexeme = try allocator.dupe(u8, "Infinity");
+        return .{ .num = .{ .lexeme = lexeme, .sign = 1, .digits = lexeme, .exp10 = 0 } };
+    }
+
+    var buf: [32]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&buf, "{d}", .{f64_val}) catch {
+        return error.InvalidFloat;
+    };
+    const lexeme = try allocator.dupe(u8, formatted);
+    return .{ .num = .{
+        .lexeme = lexeme,
+        .sign = if (f64_val < 0) @as(i8, -1) else @as(i8, 1),
+        .digits = lexeme,
+        .exp10 = 0,
+    } };
+}
 
 fn freeValue(allocator: std.mem.Allocator, value: json.Value) void {
     switch (value) {
@@ -1261,7 +1328,9 @@ pub const StreamingDecoder = struct {
     }
 
     fn readBytes(self: *Self, count: usize) ![]const u8 {
-        if (self.pos + count > self.buffer.items.len) {
+        // Non-wrapping bounds check (ASR-018): `self.pos + count` can
+        // overflow when `count` is attacker-controlled and large.
+        if (self.pos > self.buffer.items.len or count > self.buffer.items.len - self.pos) {
             return error.UnexpectedEof;
         }
         const result = self.buffer.items[self.pos..][0..count];
@@ -1412,38 +1481,42 @@ pub const StreamingDecoder = struct {
     }
 
     fn decodeSimpleOrFloat(self: *Self, additional: u5) !json.Value {
+        // QUAL-017: keep this in lockstep with the non-streaming
+        // Decoder.decodeSimpleOrFloat / floatToValue so both decoders yield
+        // identical results for the same bytes (including the simple-value
+        // case 24 and NaN/Infinity special-casing).
         switch (additional) {
             20 => return .{ .bool = false },
             21 => return .{ .bool = true },
             22 => return .null,
             23 => return .null, // undefined -> null
+            24 => {
+                const simple = try self.readBytes(1);
+                if (simple[0] == 22) return .null;
+                if (simple[0] == 23) return .null; // undefined
+                return error.InvalidSimpleValue;
+            },
             25 => {
+                // Half-precision float
                 const bytes = try self.readBytes(2);
                 const bits = std.mem.bigToNative(u16, @bitCast(bytes[0..2].*));
                 const f16_val: f16 = @bitCast(bits);
-                const float: f64 = f16_val;
-                var buf: [32]u8 = undefined;
-                const formatted = std.fmt.bufPrint(&buf, "{d}", .{float}) catch return error.InvalidFloat;
-                const lexeme = try self.allocator.dupe(u8, formatted);
-                return .{ .num = .{ .lexeme = lexeme, .sign = if (float < 0) @as(i8, -1) else 1, .digits = lexeme, .exp10 = 0 } };
+                const f64_val: f64 = f16_val;
+                return floatToValue(self.allocator, f64_val);
             },
             26 => {
+                // Single-precision float
                 const bytes = try self.readBytes(4);
-                const float: f32 = @bitCast(std.mem.bigToNative(u32, @bitCast(bytes[0..4].*)));
-                var buf: [32]u8 = undefined;
-                const formatted = std.fmt.bufPrint(&buf, "{d}", .{float}) catch return error.InvalidFloat;
-                const lexeme = try self.allocator.dupe(u8, formatted);
-                return .{ .num = .{ .lexeme = lexeme, .sign = if (float < 0) @as(i8, -1) else 1, .digits = lexeme, .exp10 = 0 } };
+                const f32_val: f32 = @bitCast(std.mem.bigToNative(u32, @bitCast(bytes[0..4].*)));
+                return floatToValue(self.allocator, f32_val);
             },
             27 => {
+                // Double-precision float
                 const bytes = try self.readBytes(8);
-                const float: f64 = @bitCast(std.mem.bigToNative(u64, @bitCast(bytes[0..8].*)));
-                var buf: [32]u8 = undefined;
-                const formatted = std.fmt.bufPrint(&buf, "{d}", .{float}) catch return error.InvalidFloat;
-                const lexeme = try self.allocator.dupe(u8, formatted);
-                return .{ .num = .{ .lexeme = lexeme, .sign = if (float < 0) @as(i8, -1) else 1, .digits = lexeme, .exp10 = 0 } };
+                const f64_val: f64 = @bitCast(std.mem.bigToNative(u64, @bitCast(bytes[0..8].*)));
+                return floatToValue(self.allocator, f64_val);
             },
-            31 => return error.InvalidSimpleValue, // Break code shouldn't appear here
+            31 => return error.UnexpectedBreak,
             else => return error.InvalidSimpleValue,
         }
     }
@@ -1878,4 +1951,204 @@ test "encode with self-describe tag" {
     // Should start with tag 55799 (0xd9 0xd9 0xf7)
     try std.testing.expect(cbor.len >= 3);
     try std.testing.expectEqual(@as(u8, 0xd9), cbor[0]);
+}
+
+// =============================================================================
+// Security / DoS Regression Tests
+// =============================================================================
+
+// ASR-004: A definite-length array/map header may declare a count up to ~2^64.
+// The decoder must reject a count that exceeds what the remaining input could
+// possibly supply, BEFORE attempting any allocation proportional to that count.
+// These payloads are only 5 bytes but claim ~100M elements; with the budget
+// check they return error.InvalidLength promptly and allocate nothing.
+
+test "ASR-004: array header claiming huge count with too few bytes errors" {
+    const allocator = std.testing.allocator;
+
+    // 0x9a = array, additional 26 (u32 count follows). 0x06000000 = 100663296.
+    const data = [_]u8{ 0x9a, 0x06, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(error.InvalidLength, decode(allocator, &data, .{}));
+}
+
+test "ASR-004: map header claiming huge count with too few bytes errors" {
+    const allocator = std.testing.allocator;
+
+    // 0xba = map, additional 26 (u32 count follows). 0x06000000 = 100663296 pairs.
+    const data = [_]u8{ 0xba, 0x06, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(error.InvalidLength, decode(allocator, &data, .{}));
+}
+
+test "ASR-004: array header with 64-bit count beyond input errors" {
+    const allocator = std.testing.allocator;
+
+    // 0x9b = array, additional 27 (u64 count follows). Count = 2^63.
+    const data = [_]u8{ 0x9b, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(error.InvalidLength, decode(allocator, &data, .{}));
+}
+
+test "ASR-004: map count larger than half remaining bytes errors" {
+    const allocator = std.testing.allocator;
+
+    // 0xb8 = map, additional 24 (1-byte count). Count = 3 pairs = needs >=6 bytes,
+    // but only 2 follow. A map pair needs >=2 bytes so 3 > 2/2 is rejected.
+    const data = [_]u8{ 0xb8, 0x03, 0x01, 0x02 };
+    try std.testing.expectError(error.InvalidLength, decode(allocator, &data, .{}));
+}
+
+test "ASR-004: valid definite-length array/map still decode" {
+    const allocator = std.testing.allocator;
+
+    // Array [1,2,3]: header claims 3, exactly 3 bytes follow.
+    {
+        const data = [_]u8{ 0x83, 0x01, 0x02, 0x03 };
+        const value = try decode(allocator, &data, .{});
+        defer free(allocator, value);
+        try std.testing.expect(value == .arr);
+        try std.testing.expectEqual(@as(usize, 3), value.arr.len);
+    }
+    // Map {"a":1}: 0xa1, "a" (0x61 0x61), 1 (0x01).
+    {
+        const data = [_]u8{ 0xa1, 0x61, 0x61, 0x01 };
+        const value = try decode(allocator, &data, .{});
+        defer free(allocator, value);
+        try std.testing.expect(value == .obj);
+        try std.testing.expectEqual(@as(usize, 1), value.obj.len);
+        try std.testing.expectEqualStrings("a", value.obj[0].k);
+    }
+}
+
+// ASR-012: A definite-length array/map that decodes several valid entries and
+// then hits a malformed one must free everything already decoded -- no leak.
+// std.testing.allocator fails the test on any leak.
+
+test "ASR-012: array with valid entries then malformed errors without leak" {
+    const allocator = std.testing.allocator;
+
+    // Array of 3: "aa" (0x62 0x61 0x61), "bb" (0x62 0x62 0x62), then a truncated
+    // string header (0x62 claims 2 bytes but none follow) -> UnexpectedEof.
+    const data = [_]u8{ 0x83, 0x62, 0x61, 0x61, 0x62, 0x62, 0x62, 0x62 };
+    try std.testing.expectError(error.UnexpectedEof, decode(allocator, &data, .{}));
+}
+
+test "ASR-012: map with valid entries then malformed value errors without leak" {
+    const allocator = std.testing.allocator;
+
+    // Map of 2: key "a"(0x61 0x61) -> val "x"(0x61 0x78), then key "b"(0x61 0x62)
+    // -> truncated string value (0x62 claims 2 bytes but only 1 follows).
+    // The decoded first member, the second member's key, and the partial value
+    // must all be freed on error.
+    const data = [_]u8{ 0xa2, 0x61, 0x61, 0x61, 0x78, 0x61, 0x62, 0x62, 0x63 };
+    try std.testing.expectError(error.UnexpectedEof, decode(allocator, &data, .{}));
+}
+
+test "ASR-012: map with non-string key after valid entry errors without leak" {
+    const allocator = std.testing.allocator;
+
+    // Map of 2: "a":1 valid, then an integer key (0x02) which is invalid for a
+    // JSON object key. The already-decoded member must be freed.
+    const data = [_]u8{ 0xa2, 0x61, 0x61, 0x01, 0x02, 0x03 };
+    try std.testing.expectError(error.InvalidMajorType, decode(allocator, &data, .{}));
+}
+
+// ASR-018: Non-wrapping bounds check. A string header claiming a count that
+// would overflow pos+count must report UnexpectedEof rather than wrapping.
+// Configure a large max_string_len so the count passes the StringTooLong gate
+// and reaches readBytes, exercising the non-wrapping form `count > len - pos`.
+
+test "ASR-018: huge string length does not wrap bounds check" {
+    const allocator = std.testing.allocator;
+
+    // 0x5b = byte string, additional 27 (u64 length). Length = 2^63, far beyond
+    // the 8 bytes of input. With max_string_len raised, this reaches readBytes
+    // and must error (UnexpectedEof), not wrap pos+count.
+    const data = [_]u8{ 0x5b, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(
+        error.UnexpectedEof,
+        decode(allocator, &data, .{ .max_string_len = std.math.maxInt(usize) }),
+    );
+}
+
+// QUAL-017: The streaming and non-streaming decoders must produce equivalent
+// output for the same bytes. Previously the streaming decoder omitted the
+// simple-value case 24 and the NaN/Infinity special-casing.
+
+fn decodeStreamingOne(allocator: std.mem.Allocator, data: []const u8) !json.Value {
+    var decoder = StreamingDecoder.init(allocator, .{});
+    defer decoder.deinit();
+    try decoder.addData(data);
+    const result = decoder.decodeNext();
+    return switch (result) {
+        .value => |v| v,
+        .err => |e| e,
+        .need_data => error.UnexpectedEof,
+    };
+}
+
+fn expectDecodersEquivalent(data: []const u8) !void {
+    const allocator = std.testing.allocator;
+
+    const a = try decode(allocator, data, .{});
+    defer free(allocator, a);
+
+    const b = try decodeStreamingOne(allocator, data);
+    defer free(allocator, b);
+
+    try std.testing.expect(a.eql(b));
+}
+
+test "QUAL-017: decoders agree on half/single/double floats" {
+    // Half-precision 1.5: 0xf9 0x3e 0x00
+    try expectDecodersEquivalent(&[_]u8{ 0xf9, 0x3e, 0x00 });
+    // Single-precision 3.14: 0xfa 0x40 0x48 0xf5 0xc3
+    try expectDecodersEquivalent(&[_]u8{ 0xfa, 0x40, 0x48, 0xf5, 0xc3 });
+    // Double-precision 1.1: 0xfb 0x3f 0xf1 0x99 0x99 0x99 0x99 0x99 0x9a
+    try expectDecodersEquivalent(&[_]u8{ 0xfb, 0x3f, 0xf1, 0x99, 0x99, 0x99, 0x99, 0x99, 0x9a });
+}
+
+test "QUAL-017: decoders agree on NaN and Infinity" {
+    const allocator = std.testing.allocator;
+
+    // Half-precision NaN: 0xf9 0x7e 0x00
+    {
+        const nan_bytes = [_]u8{ 0xf9, 0x7e, 0x00 };
+        try expectDecodersEquivalent(&nan_bytes);
+        const v = try decodeStreamingOne(allocator, &nan_bytes);
+        defer free(allocator, v);
+        try std.testing.expect(v == .num);
+        try std.testing.expectEqualStrings("NaN", v.num.lexeme);
+    }
+    // Half-precision +Infinity: 0xf9 0x7c 0x00
+    {
+        const inf_bytes = [_]u8{ 0xf9, 0x7c, 0x00 };
+        try expectDecodersEquivalent(&inf_bytes);
+        const v = try decodeStreamingOne(allocator, &inf_bytes);
+        defer free(allocator, v);
+        try std.testing.expect(v == .num);
+        try std.testing.expectEqualStrings("Infinity", v.num.lexeme);
+    }
+    // Half-precision -Infinity: 0xf9 0xfc 0x00
+    {
+        const ninf_bytes = [_]u8{ 0xf9, 0xfc, 0x00 };
+        try expectDecodersEquivalent(&ninf_bytes);
+        const v = try decodeStreamingOne(allocator, &ninf_bytes);
+        defer free(allocator, v);
+        try std.testing.expect(v == .num);
+        try std.testing.expectEqualStrings("-Infinity", v.num.lexeme);
+    }
+}
+
+test "QUAL-017: decoders agree on simple-value 24 (null/undefined)" {
+    const allocator = std.testing.allocator;
+
+    // 0xf8 0x16 = simple value 22 (null) encoded via the 1-byte form.
+    const null_bytes = [_]u8{ 0xf8, 0x16 };
+    try expectDecodersEquivalent(&null_bytes);
+
+    const v = try decodeStreamingOne(allocator, &null_bytes);
+    defer free(allocator, v);
+    try std.testing.expect(v == .null);
+
+    // 0xf8 0x17 = simple value 23 (undefined -> null).
+    try expectDecodersEquivalent(&[_]u8{ 0xf8, 0x17 });
 }
