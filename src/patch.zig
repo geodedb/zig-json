@@ -52,6 +52,17 @@ pub fn apply(allocator: std.mem.Allocator, doc: Value, patch: []const Operation)
     errdefer freeValue(allocator, current);
 
     for (patch) |op| {
+        // PERF-002 (partial): the `test` operation is a pure comparison -- it
+        // never mutates the document. Evaluate it in place rather than letting
+        // applyOperation clone the entire tree just to hand back an identical
+        // copy. This turns each `test` op from O(docsize) into O(path depth).
+        if (op.op == .@"test") {
+            const expected = op.value orelse return error.InvalidPatch;
+            const actual = pointer_mod.evaluate(current, op.path) orelse return error.PathNotFound;
+            if (!actual.eql(expected)) return error.TestFailed;
+            continue;
+        }
+
         const new_current = try applyOperation(allocator, current, op);
         freeValue(allocator, current);
         current = new_current;
@@ -786,10 +797,18 @@ fn removeKey(allocator: std.mem.Allocator, obj: Value, key: []const u8) PatchErr
         }
     }
 
-    // Free the old object
+    // Build the new backing slice FIRST. toOwnedSlice can fail with
+    // OutOfMemory; if it does, the errdefer above still owns `members` and
+    // `obj` is untouched, so the caller's errdefer can safely free `obj`
+    // (which still aliases the caller's `result`) without a double-free.
+    const new_obj = try members.toOwnedSlice(allocator);
+
+    // Only now that the new slice is owned do we free the old object. No
+    // fallible call remains after this point, so `obj` can never be left
+    // dangling while the caller still references it.
     freeValue(allocator, obj);
 
-    return .{ .obj = try members.toOwnedSlice(allocator) };
+    return .{ .obj = new_obj };
 }
 
 /// Set a key in an object, returning a new object
@@ -831,10 +850,18 @@ fn setKey(allocator: std.mem.Allocator, obj: Value, key: []const u8, value: Valu
         });
     }
 
-    // Free the old object
+    // Build the new backing slice FIRST. toOwnedSlice can fail with
+    // OutOfMemory; if it does, the errdefer above still owns `members` and
+    // `obj` is untouched, so the caller's errdefer can safely free `obj`
+    // (which still aliases the caller's `result`) without a double-free.
+    const new_obj = try members.toOwnedSlice(allocator);
+
+    // Only now that the new slice is owned do we free the old object. No
+    // fallible call remains after this point, so `obj` can never be left
+    // dangling while the caller still references it.
     freeValue(allocator, obj);
 
-    return .{ .obj = try members.toOwnedSlice(allocator) };
+    return .{ .obj = new_obj };
 }
 
 // ============================================================================
@@ -928,6 +955,40 @@ test "patch test operation failure" {
     };
 
     try std.testing.expectError(error.TestFailed, apply(allocator, doc, &ops));
+}
+
+// PERF-002 (partial): the `test` op is now evaluated in place by apply()
+// (no whole-document clone). This test guards that a `test` op interleaved
+// with a real mutation still validates correctly, still gates the patch on
+// failure, and that the final result is an independently-owned tree (the
+// std.testing.allocator catches any leak or double-free in the new path).
+test "patch test op followed by mutation (PERF-002 in-place test path)" {
+    const allocator = std.testing.allocator;
+
+    var members = [_]Member{
+        .{ .k = "a", .v = .{ .num = .{ .lexeme = "1", .sign = 1, .digits = "1", .exp10 = 0 } } },
+    };
+    const doc: Value = .{ .obj = &members };
+
+    // Passing test, then add a key.
+    {
+        const ops = [_]Operation{
+            .{ .op = .@"test", .path = "/a", .value = .{ .num = .{ .lexeme = "1", .sign = 1, .digits = "1", .exp10 = 0 } } },
+            .{ .op = .add, .path = "/b", .value = .{ .num = .{ .lexeme = "2", .sign = 1, .digits = "2", .exp10 = 0 } } },
+        };
+        const result = try apply(allocator, doc, &ops);
+        defer freeValue(allocator, result);
+        try std.testing.expectEqual(@as(usize, 2), result.obj.len);
+    }
+
+    // Failing test must abort the whole patch (the trailing add never applies).
+    {
+        const ops = [_]Operation{
+            .{ .op = .@"test", .path = "/a", .value = .{ .num = .{ .lexeme = "9", .sign = 1, .digits = "9", .exp10 = 0 } } },
+            .{ .op = .add, .path = "/b", .value = .{ .num = .{ .lexeme = "2", .sign = 1, .digits = "2", .exp10 = 0 } } },
+        };
+        try std.testing.expectError(error.TestFailed, apply(allocator, doc, &ops));
+    }
 }
 
 test "patch add to array" {
@@ -1222,4 +1283,223 @@ test "diff to JSON value" {
     try std.testing.expect(patch_value == .arr);
     try std.testing.expectEqual(@as(usize, 1), patch_value.arr.len);
     try std.testing.expect(patch_value.arr[0] == .obj);
+}
+
+// ============================================================================
+// ASR-017 regression tests: setKey / removeKey must NOT free the incoming
+// `obj` before the replacement backing slice is successfully obtained. If
+// `toOwnedSlice` fails with OutOfMemory after the old `obj` was already freed,
+// the caller's `errdefer freeValue(allocator, result)` would free that same
+// (now dangling) memory a second time -> double-free / use-after-free.
+//
+// These tests use a guard allocator that PANICS on any free of a pointer that
+// is not currently live (i.e. on a double-free), layered under a
+// FailingAllocator so we can force OutOfMemory at a chosen allocation index --
+// in particular at the `toOwnedSlice` call inside setKey/removeKey.
+// ============================================================================
+
+/// Allocator wrapper that tracks every live allocation and turns a free of an
+/// unknown / already-freed pointer into a hard test failure (panic). This is
+/// exactly the symptom of ASR-017: the caller frees `obj` a second time after
+/// setKey/removeKey already freed it on the OOM path.
+const DoubleFreeGuard = struct {
+    backing: std.mem.Allocator,
+    live: std.AutoHashMapUnmanaged(usize, usize) = .empty, // ptr -> len
+    double_free_detected: bool = false,
+
+    fn allocator(self: *DoubleFreeGuard) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = guardAlloc,
+                .resize = guardResize,
+                .remap = guardRemap,
+                .free = guardFree,
+            },
+        };
+    }
+
+    fn guardAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *DoubleFreeGuard = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        // Recording the pointer must not itself fail the allocation contract;
+        // if bookkeeping OOMs we still hand back the allocation but cannot track
+        // it. Use the backing allocator so the map survives FailingAllocator.
+        self.live.put(self.backing, @intFromPtr(p), len) catch {};
+        return p;
+    }
+
+    fn guardResize(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *DoubleFreeGuard = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(mem, alignment, new_len, ra);
+    }
+
+    fn guardRemap(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *DoubleFreeGuard = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawRemap(mem, alignment, new_len, ra) orelse return null;
+        _ = self.live.remove(@intFromPtr(mem.ptr));
+        self.live.put(self.backing, @intFromPtr(p), new_len) catch {};
+        return p;
+    }
+
+    fn guardFree(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *DoubleFreeGuard = @ptrCast(@alignCast(ctx));
+        if (!self.live.remove(@intFromPtr(mem.ptr))) {
+            // Freeing memory that is not currently live == double-free / UAF.
+            self.double_free_detected = true;
+            @panic("ASR-017: double-free / use-after-free detected");
+        }
+        self.backing.rawFree(mem, alignment, ra);
+    }
+
+    /// Free any allocations still live (pre-existing intra-`members` leaks on
+    /// OOM paths are out of scope for ASR-017) so the underlying testing
+    /// allocator does not report them, and return how many were leaked.
+    fn drainLeaks(self: *DoubleFreeGuard) usize {
+        var leaked: usize = 0;
+        var it = self.live.iterator();
+        while (it.next()) |e| {
+            const ptr: [*]u8 = @ptrFromInt(e.key_ptr.*);
+            self.backing.rawFree(ptr[0..e.value_ptr.*], .@"1", @returnAddress());
+            leaked += 1;
+        }
+        self.live.clearRetainingCapacity();
+        self.live.deinit(self.backing);
+        return leaked;
+    }
+};
+
+/// Build an object Value {"x": "1", "y": "2"} owned by `a`. The exact contents
+/// don't matter; we only need a heap-owned object whose backing slice will be
+/// the `obj` argument to setKey/removeKey.
+fn buildGuardObject(a: std.mem.Allocator) !Value {
+    var members: std.ArrayList(Member) = .empty;
+    errdefer members.deinit(a);
+    try members.append(a, .{ .k = try a.dupe(u8, "x"), .v = .{ .str = try a.dupe(u8, "1") } });
+    try members.append(a, .{ .k = try a.dupe(u8, "y"), .v = .{ .str = try a.dupe(u8, "2") } });
+    return .{ .obj = try members.toOwnedSlice(a) };
+}
+
+test "ASR-017 setKey: OOM at toOwnedSlice does not double-free obj" {
+    // Sweep the failing allocation index across the whole setKey call. At every
+    // forced-OOM point -- crucially including the final toOwnedSlice that builds
+    // the replacement backing slice -- setKey must return OutOfMemory while
+    // leaving `obj` (and the to-be-inserted `value`) untouched, so that the
+    // test, mimicking the caller's `errdefer freeValue(allocator, result)`,
+    // can free `obj` exactly once with no double-free.
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var guard = DoubleFreeGuard{ .backing = std.testing.allocator };
+        const ga = guard.allocator();
+
+        // obj and value are owned by the caller (the test) -- exactly the
+        // ownership setKey assumes on its error path.
+        const obj = try buildGuardObject(ga);
+        const value: Value = .{ .str = try ga.dupe(u8, "new") };
+
+        var failing = std.testing.FailingAllocator.init(ga, .{
+            .fail_index = fail_index,
+            .resize_fail_index = fail_index, // force toOwnedSlice's remap fast-path to fail too
+        });
+        const fa = failing.allocator();
+
+        const res = setKey(fa, obj, "x", value);
+
+        if (res) |new_val| {
+            // Succeeded before hitting the fail index: setKey took ownership of
+            // both obj and value, so we own only the returned value.
+            freeValue(ga, new_val);
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+            // setKey failed: per its contract, obj and value are still owned by
+            // us. Freeing obj here would PANIC via DoubleFreeGuard if setKey had
+            // already freed it (the ASR-017 bug).
+            freeValue(ga, obj);
+            freeValue(ga, value);
+        }
+
+        try std.testing.expect(!guard.double_free_detected);
+        _ = guard.drainLeaks();
+    }
+    // Ensure we actually exercised at least one OOM path (including the
+    // toOwnedSlice one); otherwise the test would prove nothing.
+    try std.testing.expect(saw_oom);
+}
+
+test "ASR-017 removeKey: OOM at toOwnedSlice does not double-free obj" {
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var guard = DoubleFreeGuard{ .backing = std.testing.allocator };
+        const ga = guard.allocator();
+
+        const obj = try buildGuardObject(ga);
+
+        var failing = std.testing.FailingAllocator.init(ga, .{
+            .fail_index = fail_index,
+            .resize_fail_index = fail_index,
+        });
+        const fa = failing.allocator();
+
+        const res = removeKey(fa, obj, "x");
+
+        if (res) |new_val| {
+            // removeKey took ownership of obj and returned a fresh object.
+            freeValue(ga, new_val);
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+            // obj still owned by us; freeing it must NOT double-free.
+            freeValue(ga, obj);
+        }
+
+        try std.testing.expect(!guard.double_free_detected);
+        _ = guard.drainLeaks();
+    }
+    try std.testing.expect(saw_oom);
+}
+
+test "ASR-017 mergePatch under OOM sweep does not double-free" {
+    // End-to-end: drive the real mergePatch (which calls setKey AND removeKey
+    // via its `errdefer freeValue(allocator, result)` ownership model) under a
+    // full OOM sweep. The DoubleFreeGuard panics on any double-free regardless
+    // of which internal toOwnedSlice fails. Pre-existing intra-`members` leaks
+    // on OOM paths are drained (they are out of scope for ASR-017).
+    var fail_index: usize = 0;
+    while (fail_index < 96) : (fail_index += 1) {
+        var guard = DoubleFreeGuard{ .backing = std.testing.allocator };
+        const ga = guard.allocator();
+
+        // target {"a": "1", "keep": "k"}; patch replaces "a", removes "keep"
+        // via null, and adds "b" -- exercising setKey and removeKey.
+        var target_members = [_]Member{
+            .{ .k = "a", .v = .{ .str = "1" } },
+            .{ .k = "keep", .v = .{ .str = "k" } },
+        };
+        const target: Value = .{ .obj = &target_members };
+
+        var patch_members = [_]Member{
+            .{ .k = "a", .v = .{ .str = "2" } },
+            .{ .k = "keep", .v = .null },
+            .{ .k = "b", .v = .{ .str = "3" } },
+        };
+        const patch: Value = .{ .obj = &patch_members };
+
+        var failing = std.testing.FailingAllocator.init(ga, .{
+            .fail_index = fail_index,
+            .resize_fail_index = fail_index,
+        });
+        const fa = failing.allocator();
+
+        if (mergePatch(fa, target, patch)) |result| {
+            freeValue(ga, result);
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+
+        try std.testing.expect(!guard.double_free_detected);
+        _ = guard.drainLeaks();
+    }
 }
