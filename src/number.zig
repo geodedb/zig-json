@@ -246,7 +246,12 @@ pub fn isMultipleOf(n: Number, div: Number) bool {
         // exp_diff is bounded by ~2 * EXP_SATURATE (it derives from clamped
         // exponents), so it fits in u64. modPow10 is logarithmic in exp_diff,
         // so even the maximum value costs only ~31 iterations -- no DoS.
-        remainder = (remainder * modPow10(@intCast(exp_diff), div_val)) % div_val;
+        // u128 intermediate: remainder and modPow10 result are both < div_val
+        // (which is u64), so their product can reach ~2^128 -- widen before the
+        // `% div_val` so the multiply can't overflow. The reduced result is
+        // < div_val <= u64-max, so the @intCast back to u64 is safe.
+        const scaled = @as(u128, remainder) * modPow10(@intCast(exp_diff), div_val);
+        remainder = @as(u64, @intCast(scaled % div_val));
     }
 
     return remainder == 0;
@@ -260,10 +265,13 @@ fn modPow10(exp: u64, m: u64) u64 {
     var e = exp;
     while (e > 0) {
         if (e & 1 == 1) {
-            result = (result * base) % m;
+            // u128 intermediate: result and base are both < m (which is u64),
+            // so their product can approach 2^128. Widen before the `% m` so
+            // the multiply can't overflow; the reduced value fits back in u64.
+            result = @as(u64, @intCast(@as(u128, result) * base % m));
         }
         e >>= 1;
-        base = (base * base) % m;
+        base = @as(u64, @intCast(@as(u128, base) * base % m));
     }
     return result;
 }
@@ -273,7 +281,10 @@ fn stringToU64Mod(s: []const u8, m: u64) u64 {
     if (m == 0) return 0;
     var remainder: u64 = 0;
     for (s) |c| {
-        remainder = (remainder * 10 + (c - '0')) % m;
+        // u128 intermediate: remainder is < m (which is u64), so `remainder * 10`
+        // can overflow u64. Widen before the `% m`; the reduced value fits in u64.
+        const next = @as(u128, remainder) * 10 + (c - '0');
+        remainder = @as(u64, @intCast(next % m));
     }
     return remainder;
 }
@@ -506,4 +517,43 @@ test "isMultipleOf - exact modular scaling for small exponents" {
     const eight = try parseNumber("8", std.testing.allocator);
     defer std.testing.allocator.free(eight.digits);
     try std.testing.expect(isMultipleOf(thousand, eight));
+}
+
+// NASR-003 / NQUAL-001 (Critical): isMultipleOf's modular helpers must not
+// overflow when the divisor exceeds ~2^32. Both operands are attacker-controlled
+// JSON, so a `u64 * u64` multiply in modPow10/stringToU64Mod was a process-abort
+// ("integer overflow" at number.zig:266) in Debug and ReleaseSafe -- and a silent
+// wrap to a wrong boolean in ReleaseFast. Every modular multiply now uses a u128
+// intermediate so the product can't overflow before the `% m` reduces it.
+test "isMultipleOf - large u64 divisor does not overflow (NASR-003/NQUAL-001)" {
+    const a = std.testing.allocator;
+
+    // The confirmed crash case: 19-significant-digit divisor (< 2^64 but > 2^32).
+    // 10^40 mod 9999999999999999999 == 100, so 10^40 is NOT a multiple of it.
+    const big = try parseNumber("1e40", a);
+    defer a.free(big.digits);
+    const huge_div = try parseNumber("9999999999999999999", a);
+    defer a.free(huge_div.digits);
+    // Must not panic. Result is defined and deterministic across repeated calls.
+    const r1 = isMultipleOf(big, huge_div);
+    const r2 = isMultipleOf(big, huge_div);
+    try std.testing.expectEqual(r1, r2);
+    try std.testing.expect(!r1); // 10^40 mod 9999999999999999999 == 100 != 0
+
+    // A ~10-digit prime > 2^32 against 1e64. 10^64 mod 9999999967 == 4679732603,
+    // so this is NOT a multiple either -- but it must be answered without overflow.
+    const e64 = try parseNumber("1e64", a);
+    defer a.free(e64.digits);
+    const prime = try parseNumber("9999999967", a);
+    defer a.free(prime.digits);
+    try std.testing.expect(!isMultipleOf(e64, prime));
+
+    // Correctness preserved for a true-multiple case: 9e30 (= 9 * 10^30) is a
+    // multiple of 3. This exercises stringToU64Mod on the significand and the
+    // modular scaling fold together with a small divisor.
+    const nine_e30 = try parseNumber("9e30", a);
+    defer a.free(nine_e30.digits);
+    const three = try parseNumber("3", a);
+    defer a.free(three.digits);
+    try std.testing.expect(isMultipleOf(nine_e30, three));
 }
