@@ -120,6 +120,10 @@ pub const AsyncParser = struct {
         UnexpectedEof,
         UnexpectedToken,
         InvalidString,
+        // String length exceeded options.max_string_len. Named to match the
+        // synchronous tokenizer (src/tokenizer.zig), which returns
+        // error.StringTooLong on the same condition (NQUAL-004).
+        StringTooLong,
         InvalidEscape,
         InvalidNumber,
         DepthExceeded,
@@ -713,8 +717,11 @@ pub const AsyncParser = struct {
             // unbounded buffer growth from a single oversized string (a DoS
             // guard) the same way the synchronous tokenizer does. Checked on the
             // decoded length so escape sequences cannot bypass the limit.
-            if (result.items.len >= self.opts.max_string_len) {
-                return error.InvalidString;
+            // Matches the tokenizer's boundary and error name exactly: use `>`
+            // (accept exactly max_string_len bytes, reject at max+1) and return
+            // error.StringTooLong (NQUAL-004).
+            if (result.items.len > self.opts.max_string_len) {
+                return error.StringTooLong;
             }
 
             if (c == '\\') {
@@ -1000,6 +1007,10 @@ pub const AsyncParser = struct {
             error.UnexpectedToken => .unexpected_token,
             error.InvalidUtf8 => .invalid_utf8,
             error.InvalidString => .invalid_string,
+            // String-too-long shares the `invalid_string` result code; the
+            // distinct internal error name only mirrors the tokenizer's
+            // (NQUAL-004).
+            error.StringTooLong => .invalid_string,
             error.InvalidEscape => .invalid_escape,
             error.InvalidNumber => .invalid_number,
             error.DepthExceeded => .depth_exceeded,
@@ -1179,9 +1190,10 @@ pub const AsyncIterator = struct {
 /// Ownership: the returned value owns its heap allocations independently of the
 /// (now-destroyed) internal parser. Strings own their bytes, and numbers own
 /// both their normalized `digits` and their `lexeme`. Free the returned value
-/// with `async.freeValue` (the public `json.freeValue` frees strings/containers
-/// but treats `.num` as allocation-free, which is correct for the main parser's
-/// arena-backed numbers but NOT for async-produced numbers).
+/// with `json.freeAsyncValue` (re-exported from this module's `freeValue`). The
+/// public `json.freeValue` frees strings/containers but treats `.num` as
+/// allocation-free, which is correct for the main parser's arena-backed numbers
+/// but NOT for async-produced numbers, so it would leak them.
 pub fn parseAsync(
     allocator: std.mem.Allocator,
     input: []const u8,

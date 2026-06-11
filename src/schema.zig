@@ -398,7 +398,14 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                 } else if (std.mem.eql(u8, m.k, "pattern")) {
                     if (m.v == .str) {
                         const re = try a.create(regex_mod.Regex);
-                        re.* = try regex_mod.Regex.compile(m.v.str, a);
+                        // A regex compile failure (unsupported/oversized/invalid
+                        // pattern) is a schema-compile error, not a raw error to
+                        // propagate. Report it through the `err` out-param like
+                        // every other schema-invalid failure (NQUAL-003).
+                        re.* = regex_mod.Regex.compile(m.v.str, a) catch {
+                            err.* = .{ .code = .SchemaInvalid, .line = 1, .col = 1, .offset = 0 };
+                            return error.JsonParse;
+                        };
                         node.pattern = re;
                     }
                 } else if (std.mem.eql(u8, m.k, "format")) {
@@ -454,7 +461,14 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
                         var patterns: std.ArrayList(PatternProperty) = .empty;
                         for (m.v.obj) |prop| {
                             const re = try a.create(regex_mod.Regex);
-                            re.* = try regex_mod.Regex.compile(prop.k, a);
+                            // Same as `pattern`: a compile failure on a
+                            // patternProperties key is a schema-compile error,
+                            // reported via `err` rather than propagated raw
+                            // (NQUAL-003).
+                            re.* = regex_mod.Regex.compile(prop.k, a) catch {
+                                err.* = .{ .code = .SchemaInvalid, .line = 1, .col = 1, .offset = 0 };
+                                return error.JsonParse;
+                            };
                             const loc = try pointer.append(location, prop.k, a);
                             try patterns.append(a, .{
                                 .pattern = re,
@@ -1674,6 +1688,23 @@ test "validate type string" {
         allocator.free(invalid_result.errors);
     }
     try std.testing.expect(!invalid_result.ok);
+}
+
+test "NQUAL-003: unsupported regex pattern reports SchemaInvalid via err" {
+    const allocator = std.testing.allocator;
+
+    // "(a|b)" uses alternation, which the ECMA-262 subset rejects with
+    // error.UnsupportedPattern. The schema compiler must surface this through
+    // the `err` out-param as a SchemaInvalid parse error rather than leaking the
+    // raw regex error with `err` left uninitialized.
+    const schema_json = "{\"pattern\":\"(a|b)\"}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    const result = compile(allocator, &schema_doc, .{}, null, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(json.ErrorCode.SchemaInvalid, err.code);
 }
 
 test "validate minimum" {

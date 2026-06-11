@@ -228,7 +228,7 @@ fn encodeValue(writer: anytype, value: anytype, options: EncodeOptions, depth: u
     // runtime slices, and *T pointer chains). Comptime-typed nesting is already
     // statically bounded, but a self-referential pointer graph is not. The cap
     // converts an otherwise-uncatchable stack overflow into a clean error.
-    if (depth > options.max_depth) return error.DepthLimit;
+    if (depth >= options.max_depth) return error.DepthLimit;
 
     // Check for custom marshaler first (before any other type handling)
     // Custom marshaler requires an allocator in EncodeOptions
@@ -896,7 +896,7 @@ fn encodeStructField(
 
         // Handle stringify option for numbers
         if (field_cfg.stringify) {
-            try encodeStringified(writer, field_value, options);
+            try encodeStringified(writer, field_value, options, depth + 1);
         } else if (field_cfg.binary_format) |bin_fmt| {
             // Handle binary format for []u8 fields
             const field_info = @typeInfo(field.type);
@@ -985,7 +985,12 @@ fn getStringHashMap(comptime T: type, value: anytype) ?*const std.StringHashMap(
 }
 
 /// Encode a value as a stringified number (for stringify field option)
-fn encodeStringified(writer: anytype, value: anytype, options: EncodeOptions) !void {
+///
+/// NQUAL-009: `depth` is threaded through so the non-numeric fallback re-enters
+/// `encodeValue` at the current depth rather than resetting to 0. Resetting
+/// would let a value reached through a `stringify`-marked struct field escape
+/// the `max_depth` recursion guard.
+fn encodeStringified(writer: anytype, value: anytype, options: EncodeOptions, depth: usize) !void {
     const T = @TypeOf(value);
     const info = @typeInfo(T);
 
@@ -995,14 +1000,15 @@ fn encodeStringified(writer: anytype, value: anytype, options: EncodeOptions) !v
         .float, .comptime_float => try encodeFloat(writer, value, true, options.allow_nan_infinity),
         .optional => {
             if (value) |v| {
-                try encodeStringified(writer, v, options);
+                try encodeStringified(writer, v, options, depth);
             } else {
                 try writer.writeAll("null");
             }
         },
         else => {
-            // For non-numeric types, just encode normally
-            try encodeValue(writer, value, options, 0);
+            // For non-numeric types, just encode normally, preserving the
+            // recursion depth so the max_depth guard still applies.
+            try encodeValue(writer, value, options, depth);
         },
     }
 }
@@ -1042,7 +1048,7 @@ fn encodeArray(writer: anytype, arr: anytype, options: EncodeOptions, depth: usi
 
 fn encodeJsonValue(writer: anytype, v: Value, options: EncodeOptions, depth: usize) anyerror!void {
     // ASR-016: bound recursion over runtime json.Value trees (deep or cyclic).
-    if (depth > options.max_depth) return error.DepthLimit;
+    if (depth >= options.max_depth) return error.DepthLimit;
     switch (v) {
         .null => try writer.writeAll("null"),
         .bool => |b| try writer.writeAll(if (b) "true" else "false"),
@@ -1137,7 +1143,7 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
     // ASR-016: bound recursion driven by runtime data (json.Value trees,
     // runtime slices, and *T pointer chains) so a deep or cyclic input returns
     // a clean error instead of overflowing the stack.
-    if (depth > options.max_depth) return error.DepthLimit;
+    if (depth >= options.max_depth) return error.DepthLimit;
 
     switch (info) {
         .null, .void, .undefined => return .null,
@@ -1721,6 +1727,32 @@ test "encode struct with stringify" {
     const s = try encode(std.testing.allocator, b, .{});
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings("{\"id\":\"9007199254740993\",\"name\":\"test\"}", s);
+}
+
+test "NQUAL-009: stringify field with deeply nested value still hits depth limit" {
+    const a = std.testing.allocator;
+
+    // A `stringify`-marked field whose value is a non-numeric, deeply nested
+    // json.Value tree. Before the fix, encodeStringified re-entered encodeValue
+    // at depth 0, resetting the recursion counter and escaping the max_depth
+    // guard. With depth threaded through, the nested value is bounded by
+    // max_depth like any other recursion site.
+    const Wrapper = struct {
+        payload: Value,
+
+        pub const json_config = .{
+            .payload = FieldConfig{ .stringify = true },
+        };
+    };
+
+    const nested = try buildNestedValueArray(a, 32, .null);
+    defer freeNestedValueArray(a, nested);
+
+    const w = Wrapper{ .payload = nested };
+
+    // A small max_depth must trip the guard rather than silently encoding the
+    // whole tree (or overflowing the stack on a deeper input).
+    try std.testing.expectError(error.DepthLimit, encode(a, w, .{ .max_depth = 4 }));
 }
 
 test "encode struct with combined field config" {

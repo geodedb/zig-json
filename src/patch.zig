@@ -107,11 +107,11 @@ fn applyOperation(allocator: std.mem.Allocator, doc: Value, op: Operation) Patch
             return addValue(allocator, doc, op.path, cloned);
         },
         .@"test" => {
-            const expected = op.value orelse return error.InvalidPatch;
-            const actual = pointer_mod.evaluate(doc, op.path) orelse return error.PathNotFound;
-            if (!actual.eql(expected)) return error.TestFailed;
-            // Clone for consistency - caller always frees the result
-            return try cloneValue(allocator, doc);
+            // NQUAL-005: dead code. The `test` op is a pure comparison and is
+            // handled in-place in apply() (see the PERF-002 guard there), which
+            // `continue`s before ever calling applyOperation. apply() is the
+            // only caller, so this arm is unreachable for `.@"test"`.
+            unreachable;
         },
     }
 }

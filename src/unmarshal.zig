@@ -414,7 +414,15 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                             ptr_val.* = v;
                             return .{ .ok = ptr_val };
                         },
-                        .err => |e| return .{ .err = e },
+                        // This function returns a result union (not an error
+                        // union), so `errdefer` does not fire on `.err`
+                        // returns. Free the pointee explicitly before
+                        // returning the error (NASR-004), matching the
+                        // slice/array branches above.
+                        .err => |e| {
+                            allocator.destroy(ptr_val);
+                            return .{ .err = e };
+                        },
                     }
                 },
                 else => return .{ .err = makePathError(allocator, path, .type_mismatch, "Unsupported pointer type", @typeName(T), null) },
@@ -1673,6 +1681,28 @@ test "unmarshalWithInfo success returns ok variant" {
     switch (result) {
         .ok => |v| try std.testing.expectEqual(@as(i32, 42), v.value),
         .err => try std.testing.expect(false),
+    }
+}
+
+test "NASR-004: WithInfo single-pointer pointee failure does not leak" {
+    // Unmarshaling into a `*struct{...}` where the pointee fails (field type
+    // mismatch) via the detailed-error/WithInfo entry point must return `.err`
+    // with no leak. The `.one` branch allocates the pointee before recursing;
+    // on the recursion returning `.err` it must free that allocation. Running
+    // under std.testing.allocator turns any leak into a test failure.
+    const Inner = struct { value: i32 };
+
+    var err = json.ParseError.init();
+    var doc = try json.parse(std.testing.allocator, "{\"value\": \"not a number\"}", .{}, &err);
+    defer doc.deinit();
+
+    const result = fromValueWithInfo(*Inner, std.testing.allocator, doc.root, .{});
+    switch (result) {
+        .ok => try std.testing.expect(false), // Should be error
+        .err => |info| {
+            defer if (info.path.len > 0) std.testing.allocator.free(info.path);
+            try std.testing.expect(info.kind == .type_mismatch);
+        },
     }
 }
 

@@ -23,19 +23,19 @@ pub fn isValidUtf8Seq(seq: []const u8) bool {
     const len = utf8SeqLen(seq[0]) catch return false;
     if (seq.len != len) return false;
 
-    // Check continuation bytes
-    for (seq[1..]) |b| {
-        if (b < 0x80 or b > 0xBF) return false;
-    }
-
-    // Decode and validate codepoint
+    // NPERF-001: single decode pass. decodeUtf8 already range-checks every
+    // continuation byte (0x80..0xBF), rejects a truncated sequence, and
+    // computes the codepoint, so the previous separate continuation-byte
+    // pre-scan was redundant. Apply the remaining UTF-8 validity rules
+    // (surrogate, max, overlong) to the decoded codepoint -- decodeUtf8 does
+    // NOT detect those, so they must stay here for correctness.
     const cp = decodeUtf8(seq) catch return false;
 
     // Reject surrogates
     if (cp >= 0xD800 and cp <= 0xDFFF) return false;
     if (cp > 0x10FFFF) return false;
 
-    // Check for overlong encoding
+    // Check for overlong encoding (minimum codepoint per sequence length).
     const min_cp: u21 = switch (len) {
         1 => 0,
         2 => 0x80,

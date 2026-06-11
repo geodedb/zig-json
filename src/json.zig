@@ -597,9 +597,21 @@ pub const AsyncIterator = async_mod.AsyncIterator;
 /// Parse JSON asynchronously with progress callbacks
 pub const parseAsync = async_mod.parseAsync;
 
+/// Free a value returned by `parseAsync`.
+///
+/// NQUAL-002: async-produced `.num` values own their normalized `digits` and
+/// their `lexeme` on the heap, which the module-local `async.freeValue` frees
+/// but the general `json.freeValue` does not (it treats `.num` as
+/// allocation-free, correct only for the arena-backed main parser). Callers of
+/// `parseAsync` MUST free the returned value with `json.freeAsyncValue`.
+pub const freeAsyncValue = async_mod.freeValue;
+
 // ============================================================================
 // JSON-LD Support
 // ============================================================================
+
+/// JSON-LD error set (NQUAL-006: re-exported like other modules' error sets)
+pub const LdError = jsonld_mod.Error;
 
 /// JSON-LD keywords
 pub const LdKeywords = jsonld_mod.Keywords;
