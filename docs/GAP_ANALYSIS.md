@@ -43,3 +43,30 @@
 
 - GAP-001/004 overlap security ASR-020 and quality QUAL-026 (regex correctness). GAP-002 overlaps ASR-021. GAP-003 overlaps ASR-005/ASR-014/QUAL-006. GAP-006/007 overlap QUAL-001/PERF-001. GAP-011 overlaps ASR-013/PERF-009. These are tracked once and closed together by module.
 - GAP-012 fix: make `tests/schema_suite.zig` skip with a clear message (not `FileNotFound` failures) when the suite directory is absent, so local `test-all` is green without the external clone; keep CI cloning a pinned SHA.
+
+---
+
+## Resolution Status (updated 2026-06-11, commit 458bf24)
+
+All gaps were addressed across two review/fix passes. Verification: `zig build
+test-all` = 14/14 steps, 475/512 pass (37 schema-suite tests skip gracefully when
+the external suite is absent).
+
+| Gap-ID | Status | Resolution |
+|--------|--------|-----------|
+| GAP-001 | Resolved (fail-closed) | Regex groups/alternation now return `error.UnsupportedPattern` instead of silently mis-compiling. Full alternation/grouping support is deferred feature work (disclosed in ROADMAP/API). |
+| GAP-002 | Resolved | `$ref` depth-exceed records an error and reports invalid. |
+| GAP-003 | Resolved | Tokenizer enforces `max_depth`/`max_string_len`. |
+| GAP-004 | Resolved | `\s`/`\S` include form-feed and vertical-tab. |
+| GAP-005 | Resolved (fail-closed) | Unknown JSONPath filter predicates now fail closed. RFC 9535 function extensions deferred (disclosed in ROADMAP/API). |
+| GAP-006 | Resolved (by decision) | SIMD documented as opt-in; not wired into the scalar default parser. |
+| GAP-007 | Resolved | Removed the nonexistent `findAllStructurals` doc example. |
+| GAP-008 | Resolved | `AsyncIterator.next` implemented. |
+| GAP-009 | Resolved | `@import` resolved/merged; blank-node counter per-instance. |
+| GAP-010 | Resolved (fail-closed) | URL contexts with no loader return an error; built-in network loader remains out of scope by design. |
+| GAP-011 | Resolved | Parallel chunking covers the full input. |
+| GAP-012 | Resolved | Schema suite skips gracefully when fixtures are absent; CI clone pinned to a SHA. |
+
+**Deferred features (tracked, not bugs):** regex alternation/grouping; JSONPath
+function extensions; SIMD wiring into the default parser; JSON-LD built-in remote
+context fetching; JSON Patch in-place/copy-on-write.

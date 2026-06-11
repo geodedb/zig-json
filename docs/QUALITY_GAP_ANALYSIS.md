@@ -54,3 +54,25 @@ Findings are quality/maintainability-focused; they avoid re-reporting known secu
 - **QUAL-003:** `async.zig:820-825` sets `.digits = lexeme` (entire lexeme incl. sign/`.`/`e`) and `.exp10 = 0`; `Number.compare/isInteger/isMultipleOf` assume normalized digits/exp10 → silently wrong. Fix: route async + tokenizer number building through `number_mod.parseNumber`.
 - **QUAL-007:** `encode.zig:521` `encodeInt(writer, value, stringify)` (3 params) but `:668` calls with 2 in the non-exhaustive-enum branch → `error: expected 3 argument(s), found 2` when that path instantiates.
 - **QUAL-021:** schema_gen (unions/optionals/nested/arrays/int-min-max untested), jsonl (per-line error out-param never asserted), debug (control-char escaping never exercised), time (`isLeapYear`/`daysFromEpoch`/`daysToDate`, leap-day & negative-date branches untested).
+
+---
+
+## Resolution Status (updated 2026-06-11)
+
+**Resolved:** QUAL-001 (SIMD documented opt-in + race fixed), QUAL-003 (async +
+streaming-tokenizer numbers now canonical via `number.parseNumber`), QUAL-004
+(dead `uri.zig` removed), QUAL-006 (tokenizer limits enforced), QUAL-007
+(encodeInt compile bug), QUAL-013 (pointer `page_allocator` removed; only the
+one-time thread-pool init retains it, which is appropriate), QUAL-014 (emitter
+`InvalidState`), QUAL-015 (`parseIntKeyword` honors exponent), QUAL-016 (async
+`json5` removed, iterator implemented), QUAL-022 (`toIso8601` overflow), QUAL-024
+(version 0.16.0), QUAL-026 (regex fails closed, no silent mis-compile). Plus the
+second-pass NQUAL-002..009 (error contracts, re-exports, depth off-by-one, dead
+branch, UTF-8 single pass).
+
+**Deferred (DRY/style, not bugs):** QUAL-002/005/010/011/012/017/018/019/020 —
+the duplication of `Value` lifecycle helpers, string/pointer escaping, dual
+unmarshal trees, and dual CBOR decode primitives. These are maintainability
+items tracked for a future consolidation pass; none are correctness or security
+issues. QUAL-021 (lighter-tested auxiliary modules) is partially improved by the
+many new regression tests added during closure.

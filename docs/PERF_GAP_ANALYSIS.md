@@ -30,3 +30,22 @@
 2. **PERF-009** is P1 and also a silent correctness bug (dropped tail elements / undercounted results).
 3. **PERF-001** (dead SIMD) is the biggest "unrealized performance" item: wire it in or drop the claim.
 4. **PERF-004/005/007** are P1/P2 allocation-churn fixes concentrated in the schema/number paths.
+
+---
+
+## Resolution Status (updated 2026-06-11)
+
+**Resolved:** PERF-001 (SIMD claim honest), PERF-003 (regex allocator threaded,
+scratch reused), PERF-004 (`isMultipleOf` O(log n) modular), PERF-006 (pointer
+zero-copy), PERF-008 (single-shift leading-zero strip), PERF-009 (parallel ceil
+coverage), PERF-010 (jsonld flatten ownership transfer), PERF-012 (O(1) date
+conversion), PERF-016 (SIMD feature-cache race).
+
+**Partial:** PERF-002 (patch `test` op now in-place; mutating-op full-clone cliff
+remains), PERF-005 (UTF-8 length computed once; per-element `ValidationContext`
+churn remains).
+
+**Deferred (micro-opts, untouched and not worsened):** PERF-007 (number
+re-scan), PERF-011 (jsonpath re-parse), PERF-013 (CBOR lexeme alloc / streaming
+memmove), PERF-014 (byte-at-a-time string serialization), PERF-015 (no zero-copy
+string fast path), PERF-017 (SIMD scalar bit-scan in dead code).

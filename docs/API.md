@@ -1156,10 +1156,10 @@ Advanced access to internal modules:
 | `json.number_mod` | Number parsing |
 | `json.pointer_mod` | JSON Pointer (RFC 6901) |
 | `json.schema_mod` | JSON Schema internals |
-| `json.regex` | ECMA-262 regex |
+| `json.regex` | ECMA-262 regex (subset: no alternation `\|` / grouping `()` — they return `error.UnsupportedPattern`) |
 | `json.patch_mod` | JSON Patch |
 | `json.jsonl_mod` | JSON Lines |
-| `json.jsonpath_mod` | JSONPath |
+| `json.jsonpath_mod` | JSONPath (RFC 9535 function extensions not implemented; unknown filter predicates evaluate to no-match) |
 | `json.schema_gen_mod` | Schema generation |
 | `json.simd_mod` | Opt-in SIMD scanning primitives (not used by default parser) |
 | `json.async_mod` | Async parsing |

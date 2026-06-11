@@ -491,3 +491,35 @@ error(DebugAllocator): memory address ... leaked:  .../cbor.zig:505 decodeUnsign
 ---
 
 *Reproductions were performed in an isolated `zig build` harness under `/tmp` against the package at commit `3c238be`; the repository was not modified. All "Confirmed (reproduced)" findings quote actual program output (crash signal, panic string, instruction count, or leak report).*
+
+---
+
+## Resolution Status (updated 2026-06-11)
+
+Two fix passes addressed all 28 first-pass findings; a second adversarial pass
+(NASR-001..NASR-004, NQUAL/NPERF series) caught regressions and missed cases,
+which were then fixed. Final state: `zig build test` = 442 passing (Debug,
+ReleaseSafe, ReleaseFast).
+
+**First-pass findings (ASR-001..ASR-028): all Resolved.** The five reproduced
+process-aborts (number exponent, regex compile blowup, Duration, JSONPath,
+CBOR OOM), the two memory-corruption conditions (regex double-free, parallel
+uninitialized read), and the validation bypass (`$ref` fail-open) are fixed with
+regression tests. ASR-020 (regex groups/alternation) is resolved fail-closed
+(returns `error.UnsupportedPattern`); full implementation is deferred.
+
+**Second-pass findings (all Resolved):**
+
+- NASR-001 — streaming tokenizer exponent crash + fractional-number corruption:
+  routed `parseNumberToken` through `number.parseNumber`.
+- NASR-002 — jsonld depth-limit error path leak: contents-freeing errdefers.
+- NASR-003 — `isMultipleOf` u64 overflow panic: u128 modular intermediates.
+- NASR-004 — unmarshal `*T` WithInfo leak: free pointee before `.err`.
+- NQUAL-002..009 / NPERF-001 — error-contract, ownership re-exports, depth
+  off-by-one, dead branch, UTF-8 single-pass: all fixed.
+
+**Residual/accepted:** CBOR array/map still pre-sizes to `min(prefix, remaining)`
+(input-proportional, not the original 5-byte→GB primitive); regex
+alternation/grouping and JSONPath functions are fail-closed but unimplemented;
+JSON Patch retains the per-op full-clone cost. These are bounded/by-design and
+tracked in the gap and performance analyses.

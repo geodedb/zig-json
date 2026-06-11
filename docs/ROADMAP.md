@@ -15,7 +15,9 @@ This document outlines planned features for zig-json, organized by priority. Eac
 
 - [x] RFC 8259 compliant JSON parsing
 - [x] JSON Schema 2020-12 validation
-- [x] ECMA-262 regex pattern support
+- [x] ECMA-262 regex pattern support (subset: alternation `|` and grouping
+      `()` are not implemented — patterns using them return
+      `error.UnsupportedPattern` rather than matching incorrectly)
 - [x] Zig type to JSON encoding
 - [x] Writer-based streaming output
 - [x] Pretty-print formatting
@@ -43,7 +45,9 @@ This document outlines planned features for zig-json, organized by priority. Eac
 - [x] JSON Lines (JSONL) parsing (#25)
 - [x] Schema Generation from Zig types (#26)
 - [x] Custom Format Validators (#27)
-- [x] JSONPath Query Expressions (#28)
+- [x] JSONPath Query Expressions (#28) (the RFC 9535 function extensions —
+      `length()`, `count()`, `match()`, `search()`, `value()`, `keys()` — are not
+      implemented; an unrecognized filter predicate evaluates to no-match)
 - [x] Custom Time Formats (#29)
 - [x] Reader-based Streaming Tokenizer (#30)
 - [x] JSON Diff Generation (RFC 6902) (#31)
