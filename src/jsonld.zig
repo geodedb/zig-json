@@ -590,7 +590,13 @@ pub const Processor = struct {
             .arr => |arr| {
                 // Expand each element in the array
                 var result: std.ArrayList(json.Value) = .empty;
-                errdefer result.deinit(self.allocator);
+                // Contents-freeing errdefer (NASR-002): on the error unwind
+                // (e.g. MaxDepthExceeded) free each already-expanded child
+                // subtree before deiniting the spine, not just the buffer.
+                errdefer {
+                    for (result.items) |item| freeValue(self.allocator, item);
+                    result.deinit(self.allocator);
+                }
 
                 for (arr) |item| {
                     const expanded = try self.expandInternal(item, active_context, null, depth + 1);
@@ -620,7 +626,17 @@ pub const Processor = struct {
 
                 // Expand object properties
                 var result: std.ArrayList(json.Member) = .empty;
-                errdefer result.deinit(self.allocator);
+                // Contents-freeing errdefer (NASR-002): on the error unwind free
+                // each already-appended member's key string and expanded value
+                // subtree before deiniting the spine. The bare spine-only
+                // `result.deinit` freed only the buffer, leaking the prefix.
+                errdefer {
+                    for (result.items) |m| {
+                        self.allocator.free(m.k);
+                        freeValue(self.allocator, m.v);
+                    }
+                    result.deinit(self.allocator);
+                }
 
                 for (obj) |member| {
                     // Skip @context as it's already processed
@@ -628,15 +644,35 @@ pub const Processor = struct {
 
                     // Expand property name
                     const expanded_key = try self.expandKey(local_context, member.k);
+                    // Free the in-flight key if value expansion below errors
+                    // before it is appended (and thus before ownership moves to
+                    // `result`). Cleared once ownership transfers.
+                    var key_owned = expanded_key != null;
+                    errdefer if (key_owned) self.allocator.free(expanded_key.?);
 
                     // Expand value
                     const expanded_value = try self.expandInternal(member.v, local_context, member.k, depth + 1);
+                    // Free the in-flight value if the append below fails before
+                    // ownership moves into `result`.
+                    var value_owned = true;
+                    errdefer if (value_owned) freeValue(self.allocator, expanded_value);
 
                     if (expanded_key != null and expanded_value != .null) {
                         try result.append(self.allocator, .{
                             .k = expanded_key.?,
                             .v = expanded_value,
                         });
+                        key_owned = false;
+                        value_owned = false;
+                    } else {
+                        // Not appended: free whatever was allocated so it does
+                        // not leak on the success path.
+                        if (expanded_key) |k| {
+                            self.allocator.free(k);
+                            key_owned = false;
+                        }
+                        freeValue(self.allocator, expanded_value);
+                        value_owned = false;
                     }
                 }
 
@@ -723,7 +759,10 @@ pub const Processor = struct {
                 // override imported ones. We do not silently drop @import.
                 for (obj) |member| {
                     if (std.mem.eql(u8, member.k, Keywords.import_kw)) {
-                        if (member.v != .str) continue;
+                        // A non-string @import value is invalid and must not be
+                        // silently dropped (NQUAL-007). @import must reference a
+                        // context by IRI string; anything else is unresolvable.
+                        if (member.v != .str) return Error.ContextImportFailed;
                         const import_url = member.v.str;
 
                         // Guard against @import cycles using the same set used
@@ -920,11 +959,21 @@ pub const Processor = struct {
             },
             .arr => |arr| {
                 var result: std.ArrayList(json.Value) = .empty;
-                errdefer result.deinit(self.allocator);
+                // Contents-freeing errdefer (NASR-002): free already-compacted
+                // child subtrees on the error unwind, not just the buffer.
+                errdefer {
+                    for (result.items) |item| freeValue(self.allocator, item);
+                    result.deinit(self.allocator);
+                }
 
                 for (arr) |item| {
                     const compacted = try self.compactInternal(item, context, depth + 1);
+                    // Free the in-flight subtree if the append fails before
+                    // ownership moves into `result`.
+                    var owned = true;
+                    errdefer if (owned) freeValue(self.allocator, compacted);
                     try result.append(self.allocator, compacted);
+                    owned = false;
                 }
 
                 // Compact arrays with single element if enabled
@@ -938,15 +987,35 @@ pub const Processor = struct {
             },
             .obj => |obj| {
                 var result: std.ArrayList(json.Member) = .empty;
-                errdefer result.deinit(self.allocator);
+                // Contents-freeing errdefer (NASR-002): free each already-built
+                // member's key string and compacted value subtree on the error
+                // unwind before deiniting the spine.
+                errdefer {
+                    for (result.items) |m| {
+                        self.allocator.free(m.k);
+                        freeValue(self.allocator, m.v);
+                    }
+                    result.deinit(self.allocator);
+                }
 
                 for (obj) |member| {
                     const compacted_key = try self.compactIri(context, member.k);
+                    // Free the in-flight key if value compaction errors before
+                    // the member is appended (ownership moves on append).
+                    var key_owned = true;
+                    errdefer if (key_owned) self.allocator.free(compacted_key);
+
                     const compacted_value = try self.compactInternal(member.v, context, depth + 1);
+                    // Free the in-flight value if the append fails before
+                    // ownership moves into `result`.
+                    var value_owned = true;
+                    errdefer if (value_owned) freeValue(self.allocator, compacted_value);
                     try result.append(self.allocator, .{
                         .k = compacted_key,
                         .v = compacted_value,
                     });
+                    key_owned = false;
+                    value_owned = false;
                 }
 
                 return .{ .obj = try result.toOwnedSlice(self.allocator) };
@@ -1149,7 +1218,12 @@ pub const Processor = struct {
 
         if (input == .arr) {
             var result: std.ArrayList(json.Value) = .empty;
-            errdefer result.deinit(self.allocator);
+            // Contents-freeing errdefer (NASR-002): free already-framed child
+            // subtrees on the error unwind, not just the buffer.
+            errdefer {
+                for (result.items) |item| freeValue(self.allocator, item);
+                result.deinit(self.allocator);
+            }
 
             for (input.arr) |item| {
                 if (try self.matchesFrame(item, frame_obj)) {
@@ -1172,7 +1246,16 @@ pub const Processor = struct {
 
         // Build framed result
         var result: std.ArrayList(json.Member) = .empty;
-        errdefer result.deinit(self.allocator);
+        // Contents-freeing errdefer (NASR-002): free each already-built
+        // member's key string and framed value subtree on the error unwind
+        // before deiniting the spine.
+        errdefer {
+            for (result.items) |m| {
+                self.allocator.free(m.k);
+                freeValue(self.allocator, m.v);
+            }
+            result.deinit(self.allocator);
+        }
 
         // Include all properties from frame
         for (frame_obj) |frame_member| {
@@ -1180,8 +1263,13 @@ pub const Processor = struct {
             for (input.obj) |input_member| {
                 if (std.mem.eql(u8, frame_member.k, input_member.k)) {
                     const framed_value = try self.frameInternal(input_member.v, frame_member.v, depth + 1);
+                    // Free the in-flight framed value if the key dupe or append
+                    // below fails before ownership moves into `result`.
+                    errdefer freeValue(self.allocator, framed_value);
+                    const framed_key = try self.allocator.dupe(u8, frame_member.k);
+                    errdefer self.allocator.free(framed_key);
                     try result.append(self.allocator, .{
-                        .k = try self.allocator.dupe(u8, frame_member.k),
+                        .k = framed_key,
                         .v = framed_value,
                     });
                     break;
@@ -2001,4 +2089,123 @@ test "ASR-023: blank node ids are per-instance and deterministic across runs" {
     try std.testing.expectEqualStrings("_:b1", id1b);
     try std.testing.expectEqualStrings("_:b0", id2a);
     try std.testing.expectEqualStrings("_:b1", id2b);
+}
+
+// =============================================================================
+// NASR-002: depth-limit error path must not leak partial work
+//
+// These build a deeply nested caller-owned `Value` tree with the leak-detecting
+// testing allocator (and free it themselves), then feed it to a Processor that
+// ALSO uses the testing allocator. The depth guard trips mid-build, so the
+// processor's recursive builders accumulate a partial prefix of duped keys and
+// expanded child subtrees before unwinding. The testing allocator fails the
+// test if that partial work is not freed on the error path.
+// =============================================================================
+
+/// Build a `depth`-deep nested single-member object tree, all strings duped
+/// from `allocator` so each level owns real heap key/value allocations:
+///   {"k": {"k": {"k": ... {"leaf": "v"} ... }}}
+/// Free with `freeValue(allocator, ...)`.
+fn buildDeepObject(allocator: std.mem.Allocator, depth: usize) !json.Value {
+    var current: json.Value = .{ .str = try allocator.dupe(u8, "leaf-value") };
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        const members = try allocator.alloc(json.Member, 1);
+        members[0] = .{
+            .k = try allocator.dupe(u8, "nestedKey"),
+            .v = current,
+        };
+        current = .{ .obj = members };
+    }
+    return current;
+}
+
+test "NASR-002: deep object expand error path frees partial work (no leak)" {
+    // No arena: testing.allocator detects any leak in the processor's internal
+    // partial expansion when MaxDepthExceeded unwinds.
+    const allocator = std.testing.allocator;
+
+    const deep = try buildDeepObject(allocator, 600);
+    defer freeValue(allocator, deep);
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    try std.testing.expectError(Error.MaxDepthExceeded, processor.expand(deep));
+}
+
+test "NASR-002: deep array expand error path frees partial work (no leak)" {
+    const allocator = std.testing.allocator;
+
+    // Each array level wraps an object so expandInternal's .arr branch
+    // accumulates already-expanded object subtrees before tripping the guard.
+    const inner = try buildDeepObject(allocator, 1);
+    const deep = try buildDeepArray(allocator, 600, inner);
+    defer freeValue(allocator, deep);
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    try std.testing.expectError(Error.MaxDepthExceeded, processor.expand(deep));
+}
+
+test "NASR-002: deep object compact error path frees partial work (no leak)" {
+    const allocator = std.testing.allocator;
+
+    const deep = try buildDeepObject(allocator, 600);
+    defer freeValue(allocator, deep);
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    // An empty object context: compact must expand first (which trips the guard)
+    // OR reach compactInternal; either way no partial work may leak.
+    var ctx_members = [_]json.Member{};
+    try std.testing.expectError(
+        Error.MaxDepthExceeded,
+        processor.compact(deep, .{ .obj = &ctx_members }),
+    );
+}
+
+test "NASR-002: deep object frame error path frees partial work (no leak)" {
+    const allocator = std.testing.allocator;
+
+    const deep = try buildDeepObject(allocator, 600);
+    defer freeValue(allocator, deep);
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    var frame_members = [_]json.Member{};
+    try std.testing.expectError(
+        Error.MaxDepthExceeded,
+        processor.frame(deep, .{ .obj = &frame_members }),
+    );
+}
+
+// =============================================================================
+// NQUAL-007: a non-string @import must not be silently dropped
+// =============================================================================
+
+test "NQUAL-007: non-string @import returns ContextImportFailed (not dropped)" {
+    const allocator = std.testing.allocator;
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    // @import set to a non-string (here an object) rather than a string IRI.
+    // This must error rather than silently `continue` past the import.
+    var import_obj = [_]json.Member{};
+    var ctx_members = [_]json.Member{
+        .{ .k = "@import", .v = .{ .obj = &import_obj } },
+    };
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .obj = &ctx_members } },
+        .{ .k = "name", .v = .{ .str = "Alice" } },
+    };
+
+    try std.testing.expectError(
+        Error.ContextImportFailed,
+        processor.expand(.{ .obj = &doc_members }),
+    );
 }
