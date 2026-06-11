@@ -98,6 +98,29 @@ pub fn getIriType(iri: []const u8) IriType {
     return .relative;
 }
 
+/// Errors that JSON-LD processing can return.
+///
+/// These supplement the allocator errors (`error.OutOfMemory`) that the
+/// recursive algorithms already propagate.
+pub const Error = error{
+    /// A document, value tree, or context nesting exceeded `Options.max_depth`.
+    /// Raised to bound stack usage on untrusted, caller-built `Value` trees
+    /// (which are NOT guaranteed to respect the core parser's 256-deep limit).
+    MaxDepthExceeded,
+    /// A remote `@context` URL was (directly or transitively) re-entered while
+    /// it was still being resolved, i.e. a context-resolution cycle.
+    RecursiveContext,
+    /// A URL-valued `@context` was encountered but no document loader is
+    /// configured (or the configured loader returned null for that URL), so the
+    /// context cannot be resolved. Raised instead of silently producing output
+    /// that ignores the referenced context.
+    ContextNotLoaded,
+    /// An `@import` context entry was encountered but could not be resolved
+    /// (no document loader configured, or the loader returned null). Raised
+    /// instead of silently dropping the `@import`.
+    ContextImportFailed,
+};
+
 /// JSON-LD processing options
 pub const Options = struct {
     /// Base IRI for relative IRI resolution
@@ -108,6 +131,11 @@ pub const Options = struct {
     compact_iris: bool = true,
     /// Document loader for remote contexts
     document_loader: ?*const fn ([]const u8) ?json.Value = null,
+    /// Maximum nesting depth for recursive processing of caller-built `Value`
+    /// trees and `@context` chains. Bounds stack usage on untrusted input so a
+    /// deeply nested document returns `error.MaxDepthExceeded` instead of
+    /// overflowing the stack. The default matches the core parser's nesting cap.
+    max_depth: u32 = 256,
     /// Processing mode (1.0 or 1.1)
     processing_mode: ProcessingMode = .@"1.1",
     /// Produce generalized RDF
@@ -269,20 +297,31 @@ pub const RemoteContextLoader = struct {
         };
     }
 
-    /// Create a document_loader callback function for use with Options
-    /// Note: The returned function is bound to this loader instance
+    /// Create a document_loader callback function for use with Options.
+    ///
+    /// LIMITATION (GAP-010): Zig has no stateful closures, so the returned
+    /// function pointer cannot capture this loader instance. It therefore
+    /// returns the `staticLoader` placeholder, which resolves nothing. Because
+    /// `processContext` now treats a null loader result for a URL-valued
+    /// `@context` (or `@import`) as `error.ContextNotLoaded` /
+    /// `error.ContextImportFailed` rather than silently ignoring it, wiring this
+    /// default loader up does NOT produce silently-wrong output — URL contexts
+    /// will surface a clear error. To actually resolve remote contexts, supply
+    /// your own top-level `fn ([]const u8) ?json.Value` in `Options.document_loader`
+    /// that consults a `RemoteContextLoader` (or any cache/preload table) you own.
     pub fn createDocumentLoader(self: *Self) *const fn ([]const u8) ?json.Value {
-        // This creates a closure-like pattern using a static variable
-        // In real usage, users would create their own callback that references their loader
         _ = self;
         return &staticLoader;
     }
 };
 
-// Static loader placeholder - users should create their own callbacks
+// Static loader placeholder - users should create their own callbacks.
+//
+// Always returns null. A null result for a URL-valued @context is no longer
+// silently ignored by the processor: it surfaces as error.ContextNotLoaded
+// (or error.ContextImportFailed for @import), so this placeholder can never
+// cause silently-wrong expansion/compaction output.
 fn staticLoader(url: []const u8) ?json.Value {
-    // This is a placeholder that does nothing
-    // Real implementations should use a RemoteContextLoader instance
     _ = url;
     return null;
 }
@@ -486,6 +525,16 @@ pub const Processor = struct {
     allocator: std.mem.Allocator,
     options: Options,
     active_context: Context,
+    /// Per-instance blank node counter. Used to mint deterministic blank node
+    /// identifiers (`_:bN`) during flattening. Being per-instance (rather than a
+    /// module-global `var`) makes blank node numbering deterministic per run and
+    /// free of cross-instance data races / collisions.
+    blank_node_counter: u64,
+    /// Set of remote `@context` URLs currently being resolved. Used by
+    /// `processContext` to detect resolution cycles (a loader returning a
+    /// self-referential or mutually-referential context) and fail with
+    /// `error.RecursiveContext` instead of looping forever.
+    resolving_contexts: std.StringHashMap(void),
 
     const Self = @This();
 
@@ -494,11 +543,14 @@ pub const Processor = struct {
             .allocator = allocator,
             .options = options,
             .active_context = Context.init(allocator),
+            .blank_node_counter = 0,
+            .resolving_contexts = std.StringHashMap(void).init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.active_context.deinit();
+        self.resolving_contexts.deinit();
     }
 
     // =========================================================================
@@ -507,7 +559,7 @@ pub const Processor = struct {
 
     /// Expand a JSON-LD document
     pub fn expand(self: *Self, document: json.Value) !json.Value {
-        return self.expandInternal(document, &self.active_context, null);
+        return self.expandInternal(document, &self.active_context, null, 0);
     }
 
     fn expandInternal(
@@ -515,8 +567,11 @@ pub const Processor = struct {
         element: json.Value,
         active_context: *Context,
         active_property: ?[]const u8,
+        depth: u32,
     ) !json.Value {
         _ = active_property;
+
+        if (depth > self.options.max_depth) return Error.MaxDepthExceeded;
 
         switch (element) {
             .null => return .null,
@@ -538,7 +593,7 @@ pub const Processor = struct {
                 errdefer result.deinit(self.allocator);
 
                 for (arr) |item| {
-                    const expanded = try self.expandInternal(item, active_context, null);
+                    const expanded = try self.expandInternal(item, active_context, null, depth + 1);
                     if (expanded != .null) {
                         try result.append(self.allocator, expanded);
                     }
@@ -553,7 +608,7 @@ pub const Processor = struct {
 
                 for (obj) |member| {
                     if (std.mem.eql(u8, member.k, Keywords.context)) {
-                        local_context = try self.processContext(active_context, member.v);
+                        local_context = try self.processContext(active_context, member.v, depth + 1);
                         free_local = true;
                         break;
                     }
@@ -575,7 +630,7 @@ pub const Processor = struct {
                     const expanded_key = try self.expandKey(local_context, member.k);
 
                     // Expand value
-                    const expanded_value = try self.expandInternal(member.v, local_context, member.k);
+                    const expanded_value = try self.expandInternal(member.v, local_context, member.k, depth + 1);
 
                     if (expanded_key != null and expanded_value != .null) {
                         try result.append(self.allocator, .{
@@ -616,7 +671,9 @@ pub const Processor = struct {
     // Context Processing (Section 5.2)
     // =========================================================================
 
-    fn processContext(self: *Self, active_context: *Context, local_context: json.Value) !*Context {
+    fn processContext(self: *Self, active_context: *Context, local_context: json.Value, depth: u32) (Error || std.mem.Allocator.Error)!*Context {
+        if (depth > self.options.max_depth) return Error.MaxDepthExceeded;
+
         const result = try active_context.clone();
         errdefer {
             result.deinit();
@@ -632,18 +689,82 @@ pub const Processor = struct {
                 result.language = null;
             },
             .str => |s| {
-                // Context is a URL - load it
-                if (self.options.document_loader) |loader| {
-                    if (loader(s)) |loaded| {
-                        return self.processContext(result, loaded);
+                // Context is a URL - load it via the document loader.
+                //
+                // Guard against resolution cycles: a loader that returns a
+                // (directly or transitively) self-referential context would
+                // otherwise recurse forever. Track URLs currently being
+                // resolved and fail with RecursiveContext on re-entry.
+                if (self.resolving_contexts.contains(s)) {
+                    return Error.RecursiveContext;
+                }
+
+                const loader = self.options.document_loader orelse
+                    return Error.ContextNotLoaded;
+                const loaded = loader(s) orelse return Error.ContextNotLoaded;
+
+                const url_key = try self.allocator.dupe(u8, s);
+                var key_owned = true;
+                defer if (key_owned) self.allocator.free(url_key);
+                try self.resolving_contexts.put(url_key, {});
+                key_owned = false;
+                defer {
+                    if (self.resolving_contexts.fetchRemove(s)) |kv| {
+                        self.allocator.free(kv.key);
                     }
                 }
+
+                return self.processContext(result, loaded, depth + 1);
             },
             .obj => |obj| {
+                // JSON-LD 1.1 @import (Section 4.1.2): resolve the referenced
+                // context and merge it BEFORE processing the rest of this
+                // context object. Must be handled first so local definitions
+                // override imported ones. We do not silently drop @import.
+                for (obj) |member| {
+                    if (std.mem.eql(u8, member.k, Keywords.import_kw)) {
+                        if (member.v != .str) continue;
+                        const import_url = member.v.str;
+
+                        // Guard against @import cycles using the same set used
+                        // for URL-valued contexts.
+                        if (self.resolving_contexts.contains(import_url)) {
+                            return Error.RecursiveContext;
+                        }
+
+                        const loader = self.options.document_loader orelse
+                            return Error.ContextImportFailed;
+                        const imported = loader(import_url) orelse
+                            return Error.ContextImportFailed;
+
+                        const url_key = try self.allocator.dupe(u8, import_url);
+                        var key_owned = true;
+                        defer if (key_owned) self.allocator.free(url_key);
+                        try self.resolving_contexts.put(url_key, {});
+                        key_owned = false;
+                        defer {
+                            if (self.resolving_contexts.fetchRemove(import_url)) |kv| {
+                                self.allocator.free(kv.key);
+                            }
+                        }
+
+                        // Merge the imported context into `result` in place by
+                        // processing it, then swapping the processed context's
+                        // contents for `result`'s.
+                        const merged = try self.processContext(result, imported, depth + 1);
+                        result.deinit();
+                        result.* = merged.*;
+                        self.allocator.destroy(merged);
+                    }
+                }
+
                 // Process context definition
                 for (obj) |member| {
                     if (std.mem.eql(u8, member.k, Keywords.version)) {
                         // Handle @version
+                        continue;
+                    } else if (std.mem.eql(u8, member.k, Keywords.import_kw)) {
+                        // Already handled above.
                         continue;
                     } else if (std.mem.eql(u8, member.k, Keywords.base)) {
                         // Handle @base
@@ -683,7 +804,7 @@ pub const Processor = struct {
                 // Process array of contexts in order
                 var current = result;
                 for (arr, 0..) |ctx, i| {
-                    const processed = try self.processContext(current, ctx);
+                    const processed = try self.processContext(current, ctx, depth + 1);
                     if (i > 0) {
                         current.deinit();
                         self.allocator.destroy(current);
@@ -778,17 +899,19 @@ pub const Processor = struct {
         defer freeValue(self.allocator, expanded);
 
         // Process the compaction context
-        const compact_context = try self.processContext(&self.active_context, context);
+        const compact_context = try self.processContext(&self.active_context, context, 0);
         defer {
             compact_context.deinit();
             self.allocator.destroy(compact_context);
         }
 
         // Compact the expanded document
-        return self.compactInternal(expanded, compact_context);
+        return self.compactInternal(expanded, compact_context, 0);
     }
 
-    fn compactInternal(self: *Self, element: json.Value, context: *Context) !json.Value {
+    fn compactInternal(self: *Self, element: json.Value, context: *Context, depth: u32) (Error || std.mem.Allocator.Error)!json.Value {
+        if (depth > self.options.max_depth) return Error.MaxDepthExceeded;
+
         switch (element) {
             .null, .bool, .num => return element,
             .str => |s| {
@@ -800,7 +923,7 @@ pub const Processor = struct {
                 errdefer result.deinit(self.allocator);
 
                 for (arr) |item| {
-                    const compacted = try self.compactInternal(item, context);
+                    const compacted = try self.compactInternal(item, context, depth + 1);
                     try result.append(self.allocator, compacted);
                 }
 
@@ -819,7 +942,7 @@ pub const Processor = struct {
 
                 for (obj) |member| {
                     const compacted_key = try self.compactIri(context, member.k);
-                    const compacted_value = try self.compactInternal(member.v, context);
+                    const compacted_value = try self.compactInternal(member.v, context, depth + 1);
                     try result.append(self.allocator, .{
                         .k = compacted_key,
                         .v = compacted_value,
@@ -886,18 +1009,25 @@ pub const Processor = struct {
             node_map.deinit();
         }
 
-        try self.generateNodeMap(expanded, &node_map, null);
+        try self.generateNodeMap(expanded, &node_map, null, 0);
 
-        // Create flattened output
+        // Create flattened output.
+        //
+        // PERF-010: transfer ownership of each node out of the node map instead
+        // of deep-cloning it a second time. `generateNodeMap` already produced
+        // an owned deep copy in the map; we move that value into the graph and
+        // replace the map slot with `.null` so the map's cleanup defer does not
+        // double-free it. The key remains owned by the map (freed by the defer).
         var graph: std.ArrayList(json.Value) = .empty;
         errdefer graph.deinit(self.allocator);
 
         var iter = node_map.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.* == .obj) {
-                // Clone the node
-                const cloned = try cloneValue(self.allocator, entry.value_ptr.*);
-                try graph.append(self.allocator, cloned);
+                // Move the node out of the map (ownership transfer, no clone).
+                const moved = entry.value_ptr.*;
+                entry.value_ptr.* = .null;
+                try graph.append(self.allocator, moved);
             }
         }
 
@@ -927,11 +1057,14 @@ pub const Processor = struct {
         element: json.Value,
         node_map: *std.StringHashMap(json.Value),
         active_graph: ?[]const u8,
-    ) !void {
+        depth: u32,
+    ) (Error || std.mem.Allocator.Error)!void {
+        if (depth > self.options.max_depth) return Error.MaxDepthExceeded;
+
         switch (element) {
             .arr => |arr| {
                 for (arr) |item| {
-                    try self.generateNodeMap(item, node_map, active_graph);
+                    try self.generateNodeMap(item, node_map, active_graph, depth + 1);
                 }
             },
             .obj => |obj| {
@@ -951,15 +1084,16 @@ pub const Processor = struct {
                     id = try self.generateBlankNodeId();
                 }
 
-                // Clone the object into node map
+                // Clone the object into node map (depth-bounded so an untrusted
+                // deeply nested node cannot overflow the stack here either).
                 const key = try self.allocator.dupe(u8, id.?);
-                const value = try cloneValue(self.allocator, element);
+                const value = try cloneValueDepth(self.allocator, element, depth, self.options.max_depth);
                 try node_map.put(key, value);
 
                 // Process nested nodes
                 for (obj) |member| {
                     if (member.v == .obj or member.v == .arr) {
-                        try self.generateNodeMap(member.v, node_map, active_graph);
+                        try self.generateNodeMap(member.v, node_map, active_graph, depth + 1);
                     }
                 }
             },
@@ -967,19 +1101,21 @@ pub const Processor = struct {
         }
     }
 
-    var blank_node_counter: u64 = 0;
-
     fn generateBlankNodeId(self: *Self) ![]const u8 {
-        const id = blank_node_counter;
-        blank_node_counter += 1;
+        // Per-instance counter (ASR-023 / GAP-009): blank node ids are
+        // deterministic per processing run and free of cross-instance data
+        // races, rather than sharing one module-global counter across every
+        // processor instance.
+        const id = self.blank_node_counter;
+        self.blank_node_counter += 1;
 
         var buf: [32]u8 = undefined;
-        const len = std.fmt.formatIntBuf(&buf, id, 10, .lower, .{});
-        const result = try self.allocator.alloc(u8, 3 + len);
+        const digits = std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable;
+        const result = try self.allocator.alloc(u8, 3 + digits.len);
         result[0] = '_';
         result[1] = ':';
         result[2] = 'b';
-        @memcpy(result[3..], buf[0..len]);
+        @memcpy(result[3..], digits);
         return result;
     }
 
@@ -998,13 +1134,15 @@ pub const Processor = struct {
         defer freeValue(self.allocator, expanded_frame);
 
         // Frame the document
-        return self.frameInternal(expanded, expanded_frame);
+        return self.frameInternal(expanded, expanded_frame, 0);
     }
 
-    fn frameInternal(self: *Self, input: json.Value, frame_val: json.Value) !json.Value {
+    fn frameInternal(self: *Self, input: json.Value, frame_val: json.Value, depth: u32) (Error || std.mem.Allocator.Error)!json.Value {
+        if (depth > self.options.max_depth) return Error.MaxDepthExceeded;
+
         // Match input against frame pattern
         if (frame_val != .obj) {
-            return try cloneValue(self.allocator, input);
+            return try cloneValueDepth(self.allocator, input, depth, self.options.max_depth);
         }
 
         const frame_obj = frame_val.obj;
@@ -1015,7 +1153,7 @@ pub const Processor = struct {
 
             for (input.arr) |item| {
                 if (try self.matchesFrame(item, frame_obj)) {
-                    const framed = try self.frameInternal(item, frame_val);
+                    const framed = try self.frameInternal(item, frame_val, depth + 1);
                     try result.append(self.allocator, framed);
                 }
             }
@@ -1024,7 +1162,7 @@ pub const Processor = struct {
         }
 
         if (input != .obj) {
-            return try cloneValue(self.allocator, input);
+            return try cloneValueDepth(self.allocator, input, depth, self.options.max_depth);
         }
 
         // Match object against frame
@@ -1041,7 +1179,7 @@ pub const Processor = struct {
             // Find matching property in input
             for (input.obj) |input_member| {
                 if (std.mem.eql(u8, frame_member.k, input_member.k)) {
-                    const framed_value = try self.frameInternal(input_member.v, frame_member.v);
+                    const framed_value = try self.frameInternal(input_member.v, frame_member.v, depth + 1);
                     try result.append(self.allocator, .{
                         .k = try self.allocator.dupe(u8, frame_member.k),
                         .v = framed_value,
@@ -1287,6 +1425,58 @@ fn cloneValue(allocator: std.mem.Allocator, value: json.Value) !json.Value {
                     .k = try allocator.dupe(u8, m.k),
                     .v = try cloneValue(allocator, m.v),
                 };
+            }
+            return .{ .obj = result };
+        },
+    }
+}
+
+/// Depth-bounded deep clone. Mirrors `cloneValue` but returns
+/// `Error.MaxDepthExceeded` once `depth` exceeds `max_depth`, so cloning an
+/// untrusted, deeply nested `Value` tree cannot overflow the stack. Partial
+/// allocations on the error path are released so no memory leaks.
+fn cloneValueDepth(
+    allocator: std.mem.Allocator,
+    value: json.Value,
+    depth: u32,
+    max_depth: u32,
+) (Error || std.mem.Allocator.Error)!json.Value {
+    if (depth > max_depth) return Error.MaxDepthExceeded;
+
+    switch (value) {
+        .null => return .null,
+        .bool => |b| return .{ .bool = b },
+        .num => |n| return .{ .num = n },
+        .str => |s| return .{ .str = try allocator.dupe(u8, s) },
+        .arr => |arr| {
+            var result = try allocator.alloc(json.Value, arr.len);
+            var filled: usize = 0;
+            errdefer {
+                for (result[0..filled]) |item| freeValue(allocator, item);
+                allocator.free(result);
+            }
+            for (arr, 0..) |item, i| {
+                result[i] = try cloneValueDepth(allocator, item, depth + 1, max_depth);
+                filled = i + 1;
+            }
+            return .{ .arr = result };
+        },
+        .obj => |obj| {
+            var result = try allocator.alloc(json.Member, obj.len);
+            var filled: usize = 0;
+            errdefer {
+                for (result[0..filled]) |m| {
+                    allocator.free(m.k);
+                    freeValue(allocator, m.v);
+                }
+                allocator.free(result);
+            }
+            for (obj, 0..) |m, i| {
+                const k = try allocator.dupe(u8, m.k);
+                errdefer allocator.free(k);
+                const v = try cloneValueDepth(allocator, m.v, depth + 1, max_depth);
+                result[i] = .{ .k = k, .v = v };
+                filled = i + 1;
             }
             return .{ .obj = result };
         },
@@ -1599,4 +1789,216 @@ test "Processor expand array of values" {
     const result = try processor.expand(.{ .arr = &values });
 
     try std.testing.expect(result == .arr);
+}
+
+// =============================================================================
+// DoS / correctness regression tests (ASR-009, ASR-023, GAP-009, GAP-010)
+// =============================================================================
+
+/// Build a `depth`-deep nested single-element array tree: [[[...value...]]].
+/// Allocated from `allocator` (use an arena in tests for easy cleanup).
+fn buildDeepArray(allocator: std.mem.Allocator, depth: usize, leaf: json.Value) !json.Value {
+    var current = leaf;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        const arr = try allocator.alloc(json.Value, 1);
+        arr[0] = current;
+        current = .{ .arr = arr };
+    }
+    return current;
+}
+
+test "ASR-009: deeply nested array expand returns MaxDepthExceeded (no crash)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Tree far deeper than the default max_depth (256).
+    const deep = try buildDeepArray(allocator, 5000, .{ .str = "leaf" });
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    try std.testing.expectError(Error.MaxDepthExceeded, processor.expand(deep));
+}
+
+test "ASR-009: max_depth is configurable and bounds expansion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // 20-deep tree. With a generous cap it expands; with a tiny cap it fails.
+    const deep = try buildDeepArray(allocator, 20, .{ .str = "leaf" });
+
+    {
+        var processor = Processor.init(allocator, .{ .max_depth = 1000 });
+        defer processor.deinit();
+        const ok = try processor.expand(deep);
+        try std.testing.expect(ok == .arr);
+    }
+    {
+        var processor = Processor.init(allocator, .{ .max_depth = 4 });
+        defer processor.deinit();
+        try std.testing.expectError(Error.MaxDepthExceeded, processor.expand(deep));
+    }
+}
+
+test "ASR-009: deeply nested frame input returns MaxDepthExceeded (no crash)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const deep = try buildDeepArray(allocator, 5000, .{ .str = "leaf" });
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    // Frame expands the document first, so the depth guard trips during expand.
+    var frame_members = [_]json.Member{};
+    try std.testing.expectError(
+        Error.MaxDepthExceeded,
+        processor.frame(deep, .{ .obj = &frame_members }),
+    );
+}
+
+// Test document loader that always returns the SAME url it was asked for as a
+// string context, producing a self-referential context resolution cycle.
+fn selfReferentialLoader(url: []const u8) ?json.Value {
+    return .{ .str = url };
+}
+
+test "ASR-009: self-referential @context returns RecursiveContext (no infinite loop)" {
+    // Use the leak-detecting testing allocator (no arena): this also verifies
+    // the cycle-guard cleanup path (resolving_contexts key dup/remove) and the
+    // error unwind leak nothing.
+    const allocator = std.testing.allocator;
+
+    var processor = Processor.init(allocator, .{
+        .document_loader = selfReferentialLoader,
+    });
+    defer processor.deinit();
+
+    // Document whose @context is a URL the loader resolves back to itself.
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .str = "https://example.org/ctx.jsonld" } },
+        .{ .k = "name", .v = .{ .str = "Alice" } },
+    };
+
+    try std.testing.expectError(
+        Error.RecursiveContext,
+        processor.expand(.{ .obj = &doc_members }),
+    );
+}
+
+test "GAP-010: URL @context with no document loader returns ContextNotLoaded" {
+    // Leak-detecting allocator: error path must free everything it allocated.
+    const allocator = std.testing.allocator;
+
+    // No document_loader configured.
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .str = "https://example.org/ctx.jsonld" } },
+        .{ .k = "name", .v = .{ .str = "Alice" } },
+    };
+
+    try std.testing.expectError(
+        Error.ContextNotLoaded,
+        processor.expand(.{ .obj = &doc_members }),
+    );
+}
+
+// Loader that returns a real object context for a known import URL.
+// Backed by static storage so it owns no heap memory (matches how the real
+// `document_loader` contract works: the loader owns the returned value).
+var import_ctx_members = [_]json.Member{
+    .{ .k = "name", .v = .{ .str = "http://schema.org/name" } },
+};
+fn importLoader(url: []const u8) ?json.Value {
+    if (std.mem.eql(u8, url, "https://example.org/base.jsonld")) {
+        return .{ .obj = &import_ctx_members };
+    }
+    return null;
+}
+
+test "GAP-009: @import is resolved and merged (not silently dropped)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var processor = Processor.init(allocator, .{
+        .document_loader = importLoader,
+    });
+    defer processor.deinit();
+
+    // @context that imports another context and adds nothing else.
+    var ctx_members = [_]json.Member{
+        .{ .k = "@import", .v = .{ .str = "https://example.org/base.jsonld" } },
+    };
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .obj = &ctx_members } },
+        .{ .k = "name", .v = .{ .str = "Alice" } },
+    };
+
+    const result = try processor.expand(.{ .obj = &doc_members });
+    defer freeValue(allocator, result);
+
+    // The imported context defines `name` -> http://schema.org/name, so the
+    // expanded object must contain that IRI as a key (proving @import merged).
+    try std.testing.expect(result == .obj);
+    var found = false;
+    for (result.obj) |m| {
+        if (std.mem.eql(u8, m.k, "http://schema.org/name")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "GAP-009: @import with no loader returns ContextImportFailed (not dropped)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // No loader configured: @import cannot be resolved and must error rather
+    // than be silently skipped.
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    var ctx_members = [_]json.Member{
+        .{ .k = "@import", .v = .{ .str = "https://example.org/base.jsonld" } },
+    };
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .obj = &ctx_members } },
+        .{ .k = "name", .v = .{ .str = "Alice" } },
+    };
+
+    try std.testing.expectError(
+        Error.ContextImportFailed,
+        processor.expand(.{ .obj = &doc_members }),
+    );
+}
+
+test "ASR-023: blank node ids are per-instance and deterministic across runs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Two independent processor instances must produce identical blank-node
+    // numbering, i.e. both start their counter at 0 (no shared global state /
+    // no continuously-incrementing module-global counter).
+    var p1 = Processor.init(allocator, .{});
+    defer p1.deinit();
+    const id1a = try p1.generateBlankNodeId();
+    const id1b = try p1.generateBlankNodeId();
+
+    var p2 = Processor.init(allocator, .{});
+    defer p2.deinit();
+    const id2a = try p2.generateBlankNodeId();
+    const id2b = try p2.generateBlankNodeId();
+
+    // Each fresh instance restarts numbering deterministically.
+    try std.testing.expectEqualStrings("_:b0", id1a);
+    try std.testing.expectEqualStrings("_:b1", id1b);
+    try std.testing.expectEqualStrings("_:b0", id2a);
+    try std.testing.expectEqualStrings("_:b1", id2b);
 }
