@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024-2025 CodePros
 
-//! SIMD-optimized JSON parsing utilities
+//! Standalone SIMD primitives for JSON scanning
 //!
-//! Provides vectorized operations for common JSON parsing tasks:
+//! Provides vectorized helpers for common JSON scanning tasks:
 //! - Whitespace scanning
 //! - Structural character detection
 //! - String boundary detection
@@ -11,6 +11,11 @@
 //!
 //! Uses Zig's @Vector types for portable SIMD across architectures.
 //! Falls back to scalar operations on unsupported platforms.
+//!
+//! These primitives are tested and available for opt-in use, but they are
+//! NOT wired into the library's default parser/tokenizer/unmarshaler, which
+//! are scalar. They operate on raw byte slices and do not, on their own,
+//! perform JSON validation, escape decoding, or surrogate-pair handling.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -177,16 +182,43 @@ fn xgetbv(xcr: u32) u64 {
     return (@as(u64, edx) << 32) | eax;
 }
 
-/// Cached features (computed once on first access)
-var cached_features: ?SIMDFeatures = null;
+/// Initialization state for the cached features (atomic, race-free first use).
+const FeatureState = enum(u8) { uninit, initializing, ready };
 
-/// Get cached SIMD features (thread-safe via atomic compare-exchange)
+/// Atomic guard over `cached_features`. `detectFeatures()` is a pure function
+/// of the host CPU, so any thread that computes it produces the same result;
+/// the guard only ensures exactly one publishing store and a safe handoff.
+var features_state = std.atomic.Value(FeatureState).init(.uninit);
+
+/// Cached features (computed once on first access).
+/// Only written by the thread that wins the `.uninit -> .initializing` race;
+/// readers observe it after `features_state` reaches `.ready` (acquire ordering
+/// pairs with the publishing release store, so the write is visible).
+var cached_features: SIMDFeatures = undefined;
+
+/// Get cached SIMD features.
+/// Thread-safe: the first concurrent use is race-free. Exactly one thread
+/// transitions the atomic state `.uninit -> .initializing -> .ready` and writes
+/// `cached_features`; other threads either compute the (identical) value
+/// themselves without publishing, or spin briefly until the winner publishes.
 pub fn getFeatures() SIMDFeatures {
-    if (cached_features) |f| return f;
+    // Fast path: already published.
+    if (features_state.load(.acquire) == .ready) return cached_features;
 
-    const features = detectFeatures();
-    cached_features = features;
-    return features;
+    // Try to become the initializer.
+    if (features_state.cmpxchgStrong(.uninit, .initializing, .acq_rel, .acquire) == null) {
+        const features = detectFeatures();
+        cached_features = features;
+        features_state.store(.ready, .release);
+        return features;
+    }
+
+    // Another thread is initializing (or just finished). Wait for it to publish
+    // (acquire pairs with the winner's release store) and read the cached value.
+    while (features_state.load(.acquire) != .ready) {
+        std.atomic.spinLoopHint();
+    }
+    return cached_features;
 }
 
 /// Check if SIMD is available on this platform
@@ -1004,4 +1036,49 @@ test "detectFeatures" {
 
     // simdAvailable should be consistent with has_simd
     try std.testing.expectEqual(features.has_simd, simdAvailable());
+}
+
+test "getFeatures consistent across calls" {
+    // getFeatures caches via an atomic guard; repeated calls must be identical
+    // and must agree with a fresh detectFeatures().
+    const expected = detectFeatures();
+    const a = getFeatures();
+    const b = getFeatures();
+
+    try std.testing.expectEqual(expected.has_simd, a.has_simd);
+    try std.testing.expectEqual(expected.has_sse42, a.has_sse42);
+    try std.testing.expectEqual(expected.has_avx2, a.has_avx2);
+    try std.testing.expectEqual(expected.has_avx512f, a.has_avx512f);
+    try std.testing.expectEqual(expected.has_neon, a.has_neon);
+    try std.testing.expectEqual(expected.recommended_width, a.recommended_width);
+
+    // Identical across repeated calls.
+    try std.testing.expectEqual(a.has_simd, b.has_simd);
+    try std.testing.expectEqual(a.recommended_width, b.recommended_width);
+}
+
+test "getFeatures race-free under concurrent first use" {
+    // Exercise the std.once guard from multiple threads. All threads must
+    // observe the same features and none may race on cached_features.
+    const expected = detectFeatures();
+
+    const Worker = struct {
+        fn run(out: *SIMDFeatures) void {
+            out.* = getFeatures();
+        }
+    };
+
+    var results: [8]SIMDFeatures = undefined;
+    var threads: [8]std.Thread = undefined;
+    var spawned: usize = 0;
+    for (&threads, 0..) |*t, i| {
+        t.* = std.Thread.spawn(.{}, Worker.run, .{&results[i]}) catch break;
+        spawned += 1;
+    }
+    for (threads[0..spawned]) |t| t.join();
+
+    for (results[0..spawned]) |r| {
+        try std.testing.expectEqual(expected.has_simd, r.has_simd);
+        try std.testing.expectEqual(expected.recommended_width, r.recommended_width);
+    }
 }

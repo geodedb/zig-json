@@ -1,6 +1,6 @@
 # json
 
-A fully RFC 8259 compliant JSON library for Zig 0.15.2 with JSON Schema 2020-12 validation.
+A fully RFC 8259 compliant JSON library for Zig 0.16.0 with JSON Schema 2020-12 validation.
 
 [![Build Status](https://gitlab.com/devnw/zig/json/badges/main/pipeline.svg)](https://gitlab.com/devnw/zig/json/-/pipelines)
 
@@ -9,7 +9,7 @@ A fully RFC 8259 compliant JSON library for Zig 0.15.2 with JSON Schema 2020-12 
 | Aspect | Info |
 |--------|------|
 | API Stability | Beta |
-| Zig Version | 0.15.2+ |
+| Zig Version | 0.16.0+ |
 | Platforms | Linux, macOS, Windows |
 
 ## Features
@@ -178,7 +178,7 @@ zig build docs
 
 ## Project Structure
 
-```
+```text
 json/
 ├── src/
 │   ├── json.zig        # Main library interface

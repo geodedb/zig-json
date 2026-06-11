@@ -1,6 +1,6 @@
 # API Reference
 
-Complete API documentation for zig-json - a comprehensive JSON library for Zig 0.15.2.
+Complete API documentation for zig-json - a comprehensive JSON library for Zig 0.16.0.
 
 ## Table of Contents
 
@@ -15,7 +15,7 @@ Complete API documentation for zig-json - a comprehensive JSON library for Zig 0
 - [JSONPath Query](#jsonpath-query)
 - [Schema Generation](#schema-generation)
 - [Streaming Tokenizer](#streaming-tokenizer)
-- [SIMD Acceleration](#simd-acceleration)
+- [SIMD Primitives](#simd-primitives)
 - [Async Parsing](#async-parsing)
 - [JSON-LD](#json-ld)
 - [CBOR Encoding](#cbor-encoding-rfc-8949)
@@ -101,6 +101,7 @@ pub fn parse(
 Parse JSON input into a `Document` containing a `Value` tree.
 
 **Example**:
+
 ```zig
 var err = json.ParseError.init();
 var doc = try json.parse(allocator, "{\"key\": \"value\"}", .{}, &err);
@@ -145,6 +146,7 @@ pub fn encode(
 Encode any Zig value to a JSON string.
 
 **Supported Types**:
+
 | Zig Type | JSON Output |
 |----------|-------------|
 | `bool` | `true` / `false` |
@@ -159,6 +161,7 @@ Encode any Zig value to a JSON string.
 | `union(enum)` | `{"tag": payload}` |
 
 **Example**:
+
 ```zig
 const Point = struct { x: i32, y: i32 };
 const p = Point{ .x = 10, .y = 20 };
@@ -311,6 +314,7 @@ pub fn unmarshalWithInfo(
 ```
 
 **Example**:
+
 ```zig
 const result = json.unmarshalWithInfo(MyType, allocator, input);
 switch (result) {
@@ -420,6 +424,7 @@ const s = try ts.format(allocator);
 ```
 
 **Available Formats**:
+
 - `TimeFormat.rfc3339` - `"%Y-%m-%dT%H:%M:%SZ"`
 - `TimeFormat.rfc3339_ms` - `"%Y-%m-%dT%H:%M:%S.%fZ"`
 - `TimeFormat.iso8601_date` - `"%Y-%m-%d"`
@@ -455,6 +460,7 @@ pub fn validate(
 ```
 
 **Example**:
+
 ```zig
 const schema_json =
     \\{
@@ -530,6 +536,7 @@ pub fn applyMergePatch(
 ```
 
 **Example**:
+
 ```zig
 const ops = [_]json.PatchOperation{
     .{ .op = .add, .path = "/tags", .value = .{ .arr = &[_]json.Value{} } },
@@ -570,6 +577,7 @@ pub fn jsonlIterator(
 ```
 
 **Example**:
+
 ```zig
 const input =
     \\{"name": "Alice"}
@@ -600,6 +608,7 @@ pub fn jsonpath(
 ```
 
 **Supported Syntax**:
+
 - `$` - Root element
 - `.name` or `['name']` - Child element
 - `..` - Recursive descent
@@ -610,6 +619,7 @@ pub fn jsonpath(
 - `[a,b,c]` or `[0,1,2]` - Union expressions
 
 **Example**:
+
 ```zig
 var result = try json.jsonpath(allocator, doc.root, "$.users[*].name");
 defer result.deinit();
@@ -636,6 +646,7 @@ pub fn generateSchema(
 ```
 
 **Example**:
+
 ```zig
 const Person = struct {
     name: []const u8,
@@ -701,18 +712,52 @@ defer json.freeValue(allocator, value);
 
 ---
 
-## SIMD Acceleration
+## SIMD Primitives
+
+The library ships a set of standalone, tested SIMD scanning primitives in the
+`simd` module (re-exported as `json.simd_mod`). They are **opt-in** and are
+**not** wired into the default parser/tokenizer/unmarshaler, which are scalar.
+They operate on raw byte slices and do not, by themselves, perform JSON
+validation, escape decoding, or surrogate-pair handling.
 
 ### `SimdParser`
 
-SIMD-accelerated JSON parsing:
+A standalone helper that wraps the scanning primitives with cursor and
+line/column tracking. It is independent of the default `json.parse` entry
+point and does not build a `Value`/`Document` tree:
 
 ```zig
-var parser = json.SimdParser.init(allocator, .{});
-defer parser.deinit();
+var sp = json.SimdParser.init(input, .{});
+sp.skipWhitespace();
+const next = sp.findNextStructural();
+_ = next;
+```
 
-const doc = try parser.parse(input);
-defer doc.deinit();
+### Batch Helpers
+
+```zig
+var processor = json.BatchProcessor.init(allocator);
+
+// Locate string spans: returns []{ start, end }
+const spans = try processor.findAllStrings(input);
+defer allocator.free(spans);
+
+// Count structural characters
+const counts = processor.countStructurals(input);
+// counts.objects, counts.arrays, counts.strings, counts.colons, counts.commas
+```
+
+### Free-Function Primitives
+
+```zig
+// Skip leading whitespace (returns index of first non-whitespace byte)
+const first = json.skipWhitespaceSIMD(input);
+
+// Validate UTF-8 (SIMD ASCII fast path with scalar fallback)
+const valid = json.validateUtf8SIMD(input);
+
+// Runtime check for SIMD availability
+const have_simd = json.simdAvailable();
 ```
 
 ### Feature Detection
@@ -920,6 +965,7 @@ pub fn cborToDiagnostic(
 ```
 
 **Example**:
+
 ```zig
 const json_val = doc.root;
 const cbor_bytes = try json.cborEncode(allocator, json_val, .{});
@@ -1115,7 +1161,7 @@ Advanced access to internal modules:
 | `json.jsonl_mod` | JSON Lines |
 | `json.jsonpath_mod` | JSONPath |
 | `json.schema_gen_mod` | Schema generation |
-| `json.simd_mod` | SIMD acceleration |
+| `json.simd_mod` | Opt-in SIMD scanning primitives (not used by default parser) |
 | `json.async_mod` | Async parsing |
 | `json.jsonld_mod` | JSON-LD |
 | `json.cbor_mod` | CBOR |

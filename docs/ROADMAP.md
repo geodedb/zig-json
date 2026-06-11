@@ -48,7 +48,7 @@ This document outlines planned features for zig-json, organized by priority. Eac
 - [x] Reader-based Streaming Tokenizer (#30)
 - [x] JSON Diff Generation (RFC 6902) (#31)
 - [x] Schema $ref Resolution Caching (#32)
-- [x] SIMD-optimized parsing (#33)
+- [x] Standalone SIMD scanning primitives (opt-in, not wired into the default parser) (#33)
 - [x] Async parsing support (#34)
 - [x] JSON-LD Support (#35)
 - [x] CBOR Encoding (RFC 8949) (#36)
@@ -70,6 +70,7 @@ All planned features have been completed. The library is feature-complete.
 Unmarshal/decode JSON directly into native Zig types.
 
 **API**:
+
 ```zig
 // Unmarshal JSON bytes directly to a Zig type
 pub fn unmarshal(comptime T: type, allocator: Allocator, input: []const u8) !T
@@ -82,6 +83,7 @@ pub fn unmarshalWithInfo(comptime T: type, allocator: Allocator, input: []const 
 ```
 
 **Features**:
+
 - Primitive type decoding (bool, integers, floats, strings)
 - Optional type handling
 - Struct field mapping with comptime reflection
@@ -97,6 +99,7 @@ pub fn unmarshalWithInfo(comptime T: type, allocator: Allocator, input: []const 
 Low-level streaming tokenizer for memory-efficient parsing.
 
 **API**:
+
 ```zig
 pub const Tokenizer = struct {
     pub fn init(input: []const u8, options: TokenizerOptions) Tokenizer;
@@ -113,6 +116,7 @@ pub const Tokenizer = struct {
 Types can customize JSON serialization/deserialization via `jsonMarshal` and `jsonUnmarshal` methods.
 
 **Example**:
+
 ```zig
 const CustomDate = struct {
     year: u16, month: u8, day: u8,
@@ -135,6 +139,7 @@ const CustomDate = struct {
 Customize JSON field names and behavior per struct field via `json_config`.
 
 **Example**:
+
 ```zig
 const Person = struct {
     first_name: []const u8,
@@ -148,6 +153,7 @@ const Person = struct {
 ```
 
 **Supported Options**:
+
 - `name` - Custom field name
 - `omitempty` - Omit if empty/zero
 - `skip` - Skip field entirely
@@ -165,6 +171,7 @@ const Person = struct {
 First-class time types with automatic marshaling.
 
 **Types**:
+
 - `Timestamp` - RFC 3339 timestamps ("2024-01-15T10:30:00Z")
 - `UnixTimestamp` - Unix seconds (numbers)
 - `UnixTimestampMs` - Unix milliseconds (numbers)
@@ -179,6 +186,7 @@ First-class time types with automatic marshaling.
 Multiple encoding formats for `[]u8` fields.
 
 **Formats**:
+
 ```zig
 pub const BinaryFormat = enum {
     utf8,       // Default - UTF-8 string
@@ -199,6 +207,7 @@ pub const BinaryFormat = enum {
 Fine-grained control over encoding and unmarshaling.
 
 **EncodeOptions**:
+
 - `indent` - Pretty-print indentation
 - `deterministic` - Sort keys alphabetically
 - `stringify_numbers` - Encode all numbers as strings
@@ -211,6 +220,7 @@ Fine-grained control over encoding and unmarshaling.
 - `use_fmt_formatter` - Use format() method for types
 
 **UnmarshalOptions**:
+
 - `ignore_unknown_fields` - Silently ignore unknown fields
 - `use_field_tags` - Use json_config for field mapping
 - `default_binary_format` - Default binary decoding
@@ -226,6 +236,7 @@ Fine-grained control over encoding and unmarshaling.
 Promote nested struct fields to the parent level.
 
 **Example**:
+
 ```zig
 const User = struct {
     id: u64,
@@ -249,6 +260,7 @@ const User = struct {
 Capture unknown JSON fields into a designated struct field.
 
 **Example**:
+
 ```zig
 const Config = struct {
     name: []const u8,
@@ -269,6 +281,7 @@ const Config = struct {
 Rich semantic errors with JSON Pointer paths.
 
 **Types**:
+
 ```zig
 pub const UnmarshalErrorInfo = struct {
     path: []const u8,      // e.g., "/users/0/email"
@@ -298,6 +311,7 @@ pub const UnmarshalErrorKind = enum {
 Encode/decode NaN and Infinity as JSON strings.
 
 **Example**:
+
 ```zig
 const options = EncodeOptions{ .allow_nan_infinity = true };
 // NaN -> "NaN", Infinity -> "Infinity", -Infinity -> "-Infinity"
@@ -315,6 +329,7 @@ const unmarshal_opts = UnmarshalOptions{ .allow_nan_infinity = true };
 Use Zig's `format()` method for custom string encoding.
 
 **Example**:
+
 ```zig
 const Point = struct {
     x: i32, y: i32,
@@ -337,12 +352,14 @@ const Point = struct {
 Build JSON output incrementally without constructing a Value tree first.
 
 **API**:
+
 ```zig
 pub fn StreamingEncoder(comptime WriterType: type) type;
 pub fn streamingEncoder(allocator: Allocator, writer: anytype, options: EncoderOptions) StreamingEncoder(@TypeOf(writer));
 ```
 
 **Example**:
+
 ```zig
 var buf: std.ArrayList(u8) = .empty;
 defer buf.deinit(allocator);
@@ -361,6 +378,7 @@ try enc.endObject();
 ```
 
 **Methods**:
+
 - `beginObject()` / `endObject()` - Start/end JSON object
 - `beginArray()` / `endArray()` - Start/end JSON array
 - `writeKey(key)` - Write object key
@@ -378,12 +396,14 @@ try enc.endObject();
 Read JSON values directly from tokenizer without building full tree first.
 
 **API**:
+
 ```zig
 pub fn readValue(tokenizer: *Tokenizer) !json.Value;
 pub fn freeValue(allocator: Allocator, value: json.Value) void;
 ```
 
 **Example**:
+
 ```zig
 var tokenizer = json.Tokenizer.init(allocator, input, .{});
 defer tokenizer.deinit();
@@ -404,6 +424,7 @@ defer json.freeValue(allocator, value);
 Use `std.StringHashMap(json.Value)` as an alternative to `[]json.Member` for capturing unknown fields.
 
 **Example**:
+
 ```zig
 const Config = struct {
     name: []const u8,
@@ -416,6 +437,7 @@ const Config = struct {
 ```
 
 **Benefits**:
+
 - O(1) lookup for captured fields by key
 - More convenient for accessing specific unknown fields
 - Same round-trip behavior as []json.Member
@@ -429,6 +451,7 @@ const Config = struct {
 Parse JSON5, an extension of JSON with additional syntax features.
 
 **Features**:
+
 - Single-line (`//`) and multi-line (`/* */`) comments
 - Trailing commas in objects and arrays
 - Unquoted object keys (ECMAScript identifiers)
@@ -440,6 +463,7 @@ Parse JSON5, an extension of JSON with additional syntax features.
 - NaN and Infinity literals
 
 **Usage**:
+
 ```zig
 var err = json.ParseError.init();
 var doc = try json.parse(allocator, input, .{ .json5 = true }, &err);
@@ -454,6 +478,7 @@ var doc = try json.parse(allocator, input, .{ .json5 = true }, &err);
 Apply and parse JSON Patch documents for modifying JSON values.
 
 **Operations**:
+
 - `add` - Add a value at the target path
 - `remove` - Remove the value at the target path
 - `replace` - Replace the value at the target path
@@ -462,6 +487,7 @@ Apply and parse JSON Patch documents for modifying JSON values.
 - `test` - Test that a value equals an expected value
 
 **API**:
+
 ```zig
 // Apply a patch
 const result = try json.applyPatch(allocator, doc, &ops);
@@ -480,12 +506,14 @@ const ops = try json.parsePatch(allocator, patch_value);
 Apply JSON Merge Patch for simpler partial updates.
 
 **Rules**:
+
 - If patch is not an object, it replaces the target entirely
 - For each key in the patch:
   - If value is `null`, remove the key from target
   - Otherwise, recursively merge
 
 **API**:
+
 ```zig
 const result = try json.applyMergePatch(allocator, target, patch);
 defer json.freePatchValue(allocator, result);
@@ -500,6 +528,7 @@ defer json.freePatchValue(allocator, result);
 Parse newline-delimited JSON (NDJSON/JSON Lines) format.
 
 **API**:
+
 ```zig
 // Parse all lines at once
 var err: json.JsonlError = undefined;
@@ -525,6 +554,7 @@ while (try iter.next(&err)) |*d| {
 Generate JSON Schema (draft 2020-12) from Zig type definitions.
 
 **Supported Types**:
+
 - Structs → object schema with properties
 - Enums → string enum schema
 - Optionals → anyOf with null
@@ -533,6 +563,7 @@ Generate JSON Schema (draft 2020-12) from Zig type definitions.
 - Primitives → appropriate type schemas
 
 **API**:
+
 ```zig
 const Person = struct {
     name: []const u8,
@@ -554,6 +585,7 @@ defer json.freeSchema(allocator, schema);
 Register custom format validators for JSON Schema validation.
 
 **API**:
+
 ```zig
 fn validatePhoneNumber(str: []const u8) bool {
     return std.mem.startsWith(u8, str, "+") and str.len >= 10;
@@ -577,6 +609,7 @@ const result = try json.validate(allocator, &schema, doc.root, .{
 Query JSON documents using JSONPath syntax (Stefan Goessner specification).
 
 **Supported Operators**:
+
 - `$` - Root element
 - `.name` or `['name']` - Child element
 - `..` - Recursive descent
@@ -586,6 +619,7 @@ Query JSON documents using JSONPath syntax (Stefan Goessner specification).
 - `[?(@.field == value)]` - Filter expression
 
 **API**:
+
 ```zig
 const result = try json.jsonpath(allocator, doc.root, "$.users[*].name");
 defer result.deinit();
@@ -604,6 +638,7 @@ for (result.values) |value| {
 User-defined format strings for time types beyond RFC 3339/ISO 8601.
 
 **Supported Format Specifiers**:
+
 - `%Y` - 4-digit year
 - `%y` - 2-digit year
 - `%m` - 2-digit month
@@ -618,6 +653,7 @@ User-defined format strings for time types beyond RFC 3339/ISO 8601.
 - `%Z` - Timezone name
 
 **API**:
+
 ```zig
 const SqlTimestamp = json.FormattedTimestamp(json.TimeFormat.sql_datetime);
 
@@ -631,6 +667,7 @@ defer allocator.free(s);
 ```
 
 **Built-in Formats**:
+
 - `TimeFormat.rfc3339` - RFC 3339 (`2024-01-15T10:30:00Z`)
 - `TimeFormat.sql_datetime` - SQL format (`2024-01-15 10:30:00`)
 - `TimeFormat.us_date` - US date (`01/15/2024`)
@@ -646,6 +683,7 @@ defer allocator.free(s);
 Tokenize JSON from any `std.io.Reader` source without loading the entire input into memory.
 
 **API**:
+
 ```zig
 var file = try std.fs.cwd().openFile("large.json", .{});
 defer file.close();
@@ -673,6 +711,7 @@ defer json.freeValue(allocator, value);
 Generate JSON Patch documents that transform one JSON value into another.
 
 **API**:
+
 ```zig
 // Generate diff
 const ops = try json.diffPatch(allocator, from, to);
@@ -696,6 +735,7 @@ defer json.freePatchValue(allocator, patch_json);
 Improved performance for JSON Schema validation through caching of resolved `$ref` and `$dynamicRef` references.
 
 **Benefits**:
+
 - Avoids repeated URI parsing and resolution during validation
 - Significant speedup for schemas with many references
 - Automatic cache invalidation per validation session
@@ -703,36 +743,42 @@ Improved performance for JSON Schema validation through caching of resolved `$re
 
 ---
 
-### #33 - SIMD-optimized Parsing
+### #33 - Standalone SIMD Scanning Primitives
 
-**Status**: Completed
+**Status**: Completed (opt-in primitives only)
 
-Vectorized JSON parsing operations using SIMD instructions for improved performance.
+Vectorized JSON scanning helpers built on Zig's `@Vector` types. These are
+standalone, tested primitives available for opt-in use. They are **not** wired
+into the library's default parser, tokenizer, or unmarshaler, which remain
+scalar. The primitives operate on raw byte slices and do not, on their own,
+perform JSON validation, escape decoding, or surrogate-pair handling.
 
-**Features**:
+**Primitives**:
+
 - Whitespace skipping using SIMD vector comparisons
 - Structural character detection (braces, brackets, quotes, colons, commas)
-- String boundary scanning with quote detection
-- UTF-8 validation using SIMD
-- Batch processing for large documents
+- String boundary scanning with quote/backslash detection
+- UTF-8 validation (SIMD ASCII fast path with scalar fallback)
+- Batch helpers for counting structurals and locating string spans
 
 **API**:
+
 ```zig
-const simd = json.simd;
+const simd = json.simd_mod;
 
-// Create a batch processor
+// Batch helpers
 var processor = simd.BatchProcessor.init(allocator);
-defer processor.deinit();
 
-// Find structural characters
-const results = try processor.findAllStructurals(input);
+// Locate string spans: returns []{ start, end }
+const spans = try processor.findAllStrings(input);
+defer allocator.free(spans);
 
-// Count structures
+// Count structural characters
 const counts = processor.countStructurals(input);
-// counts.objects, counts.arrays, counts.strings, etc.
+// counts.objects, counts.arrays, counts.strings, counts.colons, counts.commas
 
-// Skip whitespace
-const trimmed = simd.skipWhitespaceSIMD(input);
+// Skip leading whitespace (returns index of first non-whitespace byte)
+const first = simd.skipWhitespaceSIMD(input);
 
 // Validate UTF-8
 const valid = simd.validateUtf8SIMD(input);
@@ -747,12 +793,14 @@ const valid = simd.validateUtf8SIMD(input);
 Non-blocking incremental JSON parsing for async contexts with progress reporting.
 
 **Features**:
+
 - Incremental parsing with configurable yield intervals
 - Progress callbacks and cancellation support
 - Memory-efficient streaming from any source
 - Resume parsing after yielding
 
 **API**:
+
 ```zig
 const async_parser = json.async_parser;
 
@@ -796,12 +844,14 @@ while (true) {
 JSON for Linked Data (JSON-LD) processing including context expansion, compaction, and serialization.
 
 **Features**:
+
 - Context expansion and compaction (JSON-LD 1.1)
 - Document flattening
 - N-Quads serialization
 - Frame processing
 
 **API**:
+
 ```zig
 const jsonld = json.jsonld;
 
@@ -828,6 +878,7 @@ defer allocator.free(nquads);
 Concise Binary Object Representation encoding and decoding per RFC 8949.
 
 **Features**:
+
 - Full major type support (0-7)
 - Indefinite-length encoding
 - Canonical encoding option
@@ -836,6 +887,7 @@ Concise Binary Object Representation encoding and decoding per RFC 8949.
 - Streaming encoding
 
 **API**:
+
 ```zig
 const cbor = json.cbor;
 
@@ -857,6 +909,7 @@ defer allocator.free(diag);
 ```
 
 **Supported CBOR Types**:
+
 - Unsigned integers (major type 0)
 - Negative integers (major type 1)
 - Byte strings (major type 2)
@@ -880,5 +933,6 @@ Contributions are welcome! Please check the linked issues for detailed specifica
 ## References
 
 This roadmap is inspired by Go's `encoding/json/v2` package design:
+
 - [Go Blog: A new experimental Go API for JSON](https://go.dev/blog/jsonv2-exp)
 - [Go encoding/json/v2 Package](https://pkg.go.dev/encoding/json/v2)

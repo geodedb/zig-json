@@ -3,7 +3,7 @@
 
 //! zigjsonschema - RFC 8259 JSON Parser and JSON Schema 2020-12 Validator
 //!
-//! A strict, spec-compliant JSON library for Zig 0.15.2 with:
+//! A strict, spec-compliant JSON library for Zig 0.16.0 with:
 //! - RFC 8259 compliant parsing (no comments, trailing commas, NaN, Infinity)
 //! - Normalized base-10 decimal number model
 //! - JSON Schema draft 2020-12 compilation and validation
@@ -11,6 +11,11 @@
 //! - Type-safe encoding and unmarshaling with struct field tags
 //! - Streaming tokenizer for memory-efficient parsing
 //! - Time/Duration types with RFC 3339 and ISO 8601 support
+//!
+//! Note: the default parser, tokenizer, and unmarshaler are scalar. The
+//! `simd` module (re-exported as `simd_mod`) provides standalone, tested
+//! SIMD primitives for opt-in use; they are not wired into the default
+//! parse path. See `simd_mod` and the SIMD re-exports below.
 
 const std = @import("std");
 
@@ -527,34 +532,38 @@ pub fn jsonpath(allocator: std.mem.Allocator, root: Value, path: []const u8) Pat
 }
 
 // ============================================================================
-// SIMD-Optimized Parsing
+// Opt-in SIMD Primitives
 // ============================================================================
+//
+// These are standalone, tested SIMD helpers. They are NOT wired into the
+// default parser/tokenizer/unmarshaler (which are scalar). Use them directly
+// if you want to build SIMD-assisted scanning on top of this library.
 
-/// SIMD vector size used for optimizations
+/// SIMD vector width (in bytes) used by the primitives below
 pub const SIMD_VECTOR_SIZE = simd_mod.VECTOR_SIZE;
 
-/// SIMD parser for accelerated JSON parsing
+/// Standalone SIMD scanning helper (not used by the default `parse`)
 pub const SimdParser = simd_mod.SimdParser;
 
-/// SIMD parser options
+/// Options for `SimdParser`
 pub const SimdParseOptions = simd_mod.SimdParseOptions;
 
-/// Batch processor for SIMD operations
+/// Batch SIMD helpers: count structurals and locate string spans
 pub const BatchProcessor = simd_mod.BatchProcessor;
 
-/// Skip whitespace using SIMD operations
+/// Skip leading whitespace (space/tab/newline/CR) using SIMD
 pub const skipWhitespaceSIMD = simd_mod.skipWhitespaceSIMD;
 
-/// Find structural characters using SIMD
+/// Find the next JSON structural character using SIMD
 pub const findStructuralSIMD = simd_mod.findStructuralSIMD;
 
-/// Scan string boundaries using SIMD
+/// Scan to the next quote/backslash using SIMD (no escape/surrogate decoding)
 pub const scanStringSIMD = simd_mod.scanStringSIMD;
 
-/// Validate UTF-8 using SIMD
+/// Validate UTF-8 using a SIMD ASCII fast path with scalar fallback
 pub const validateUtf8SIMD = simd_mod.validateUtf8SIMD;
 
-/// Check if SIMD is available on this platform
+/// Report whether SIMD is available on this platform (runtime feature check)
 pub const simdAvailable = simd_mod.simdAvailable;
 
 // ============================================================================
