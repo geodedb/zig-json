@@ -168,8 +168,12 @@ test:json-schema-suite:
   before_script:
     - *install-zig
     - apt-get install -y git
-    # Fetch JSON Schema Test Suite from GitHub (external data source)
-    - git clone --depth 1 https://github.com/json-schema-org/JSON-Schema-Test-Suite.git testdata/JSON-Schema-Test-Suite
+    # Fetch JSON Schema Test Suite from GitHub (external data source).
+    # Pinned to a specific commit so a compromised or retargeted upstream `main`
+    # cannot silently change what the schema suite validates against (ASR-025).
+    - SUITE_SHA=fe8c2f0de2041943975932b6bf4bd882625b6cfb
+    - git clone --filter=blob:none --no-checkout https://github.com/json-schema-org/JSON-Schema-Test-Suite.git testdata/JSON-Schema-Test-Suite
+    - git -C testdata/JSON-Schema-Test-Suite checkout "$SUITE_SHA"
   script:
     - zig build test-schema --summary all
   needs:

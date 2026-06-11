@@ -1,11 +1,21 @@
 # Gitleaks configuration for json library
-# Exclude example files which contain intentional demo credentials
+#
+# Previously the entire examples/ and tests/ trees were allowlisted, which would
+# also hide a *real* secret accidentally committed there. Those trees contain no
+# secret-shaped strings, so instead we scan everything and suppress only obvious
+# demo/placeholder patterns by regex. This keeps real-secret detection live
+# across the whole repo.
 
 [extend]
 useDefault = true
 
 [allowlist]
-paths = [
-    '''examples/.*''',
-    '''tests/.*''',
+description = "Allow only obvious demo/sample/placeholder credentials"
+regexTarget = "match"
+regexes = [
+    # Generic placeholders used in examples and docs
+    '''(?i)(example|sample|demo|dummy|placeholder|changeme|test[-_]?secret|your[-_]?(api[-_]?)?(key|token|secret))''',
+    # Canonical AWS documentation example credentials
+    '''AKIAIOSFODNN7EXAMPLE''',
+    '''wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY''',
 ]
