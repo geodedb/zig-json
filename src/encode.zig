@@ -113,6 +113,12 @@ pub const EncodeOptions = struct {
     /// Use std.fmt.Formatter (format method) for types that have it
     /// When enabled, types with a format() method will be encoded as JSON strings
     use_fmt_formatter: bool = false,
+    /// Maximum nesting depth for recursion over runtime-data-driven structures:
+    /// runtime `json.Value` trees, runtime slices, and `*T` pointer chains.
+    /// Exceeding this returns `error.DepthLimit` instead of overflowing the
+    /// stack on a deep or cyclic (self-referential pointer) input. Mirrors the
+    /// parser's default `max_depth` (256). See ASR-016.
+    max_depth: u16 = 256,
 };
 
 /// Default options for minified output
@@ -141,8 +147,12 @@ pub fn encodeToWriter(writer: anytype, value: anytype, options: EncodeOptions) !
 }
 
 /// Convert any Zig value to a json.Value tree
+///
+/// Returns `error.DepthLimit` if recursion over runtime-data-driven structures
+/// (runtime `json.Value`, slices, or `*T` pointer chains) exceeds
+/// `options.max_depth`. This bounds deep or cyclic inputs. See ASR-016.
 pub fn toValue(allocator: std.mem.Allocator, value: anytype, options: EncodeOptions) !Value {
-    return toValueInternal(allocator, value, options);
+    return toValueInternal(allocator, value, options, 0);
 }
 
 // ============================================================================
@@ -207,9 +217,18 @@ fn getFieldConfig(comptime T: type, comptime field_name: []const u8) FieldConfig
     return .{};
 }
 
-fn encodeValue(writer: anytype, value: anytype, options: EncodeOptions, depth: usize) !void {
+// Explicit `anyerror` return type breaks the inferred-error-set dependency
+// loop that arises for self-referential pointer types (e.g. a struct with a
+// `?*@This()` field), matching encodeArray/encodeJsonValue below.
+fn encodeValue(writer: anytype, value: anytype, options: EncodeOptions, depth: usize) anyerror!void {
     const T = @TypeOf(value);
     const info = @typeInfo(T);
+
+    // ASR-016: bound recursion driven by runtime data (json.Value trees,
+    // runtime slices, and *T pointer chains). Comptime-typed nesting is already
+    // statically bounded, but a self-referential pointer graph is not. The cap
+    // converts an otherwise-uncatchable stack overflow into a clean error.
+    if (depth > options.max_depth) return error.DepthLimit;
 
     // Check for custom marshaler first (before any other type handling)
     // Custom marshaler requires an allocator in EncodeOptions
@@ -278,8 +297,10 @@ fn encodeValue(writer: anytype, value: anytype, options: EncodeOptions, depth: u
         .pointer => |ptr| {
             switch (ptr.size) {
                 .one => {
-                    // Dereference single-item pointer
-                    try encodeValue(writer, value.*, options, depth);
+                    // Dereference single-item pointer. Increment depth so a
+                    // self-referential pointer chain is bounded by max_depth
+                    // (otherwise a *T cycle recurses forever). See ASR-016.
+                    try encodeValue(writer, value.*, options, depth + 1);
                 },
                 .slice => {
                     // Check for nil/empty slice -> null conversion
@@ -665,7 +686,7 @@ fn encodeEnum(writer: anytype, value: anytype) !void {
         if (std.enums.tagName(T, value)) |name| {
             try encodeString(writer, name, .{});
         } else {
-            try encodeInt(writer, @intFromEnum(value));
+            try encodeInt(writer, @intFromEnum(value), false);
         }
     }
 }
@@ -1019,7 +1040,9 @@ fn encodeArray(writer: anytype, arr: anytype, options: EncodeOptions, depth: usi
     try writer.writeByte(']');
 }
 
-fn encodeJsonValue(writer: anytype, v: Value, options: EncodeOptions, depth: usize) !void {
+fn encodeJsonValue(writer: anytype, v: Value, options: EncodeOptions, depth: usize) anyerror!void {
+    // ASR-016: bound recursion over runtime json.Value trees (deep or cyclic).
+    if (depth > options.max_depth) return error.DepthLimit;
     switch (v) {
         .null => try writer.writeAll("null"),
         .bool => |b| try writer.writeAll(if (b) "true" else "false"),
@@ -1105,9 +1128,16 @@ fn writeNewline(writer: anytype, options: EncodeOptions, depth: usize) !void {
 // toValue implementation - converts Zig types to json.Value tree
 // ============================================================================
 
-fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: EncodeOptions) !Value {
+// Explicit `anyerror` return type breaks the inferred-error-set dependency
+// loop that arises for self-referential pointer types.
+fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: EncodeOptions, depth: u16) anyerror!Value {
     const T = @TypeOf(value);
     const info = @typeInfo(T);
+
+    // ASR-016: bound recursion driven by runtime data (json.Value trees,
+    // runtime slices, and *T pointer chains) so a deep or cyclic input returns
+    // a clean error instead of overflowing the stack.
+    if (depth > options.max_depth) return error.DepthLimit;
 
     switch (info) {
         .null, .void, .undefined => return .null,
@@ -1159,7 +1189,7 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
 
         .optional => {
             if (value) |v| {
-                return toValueInternal(allocator, v, options);
+                return toValueInternal(allocator, v, options, depth);
             } else {
                 return .null;
             }
@@ -1181,7 +1211,7 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                         if (field.type == void) {
                             members[0].v = .null;
                         } else {
-                            members[0].v = try toValueInternal(allocator, @field(value, field.name), options);
+                            members[0].v = try toValueInternal(allocator, @field(value, field.name), options, depth + 1);
                         }
                         break;
                     }
@@ -1204,7 +1234,7 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
             if (s.is_tuple) {
                 var arr = try allocator.alloc(Value, s.fields.len);
                 inline for (s.fields, 0..) |field, i| {
-                    arr[i] = try toValueInternal(allocator, @field(value, field.name), options);
+                    arr[i] = try toValueInternal(allocator, @field(value, field.name), options, depth + 1);
                 }
                 return .{ .arr = arr };
             } else {
@@ -1251,10 +1281,10 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                         const ft_info = @typeInfo(field.type);
                         if (ft_info == .optional) {
                             if (fv) |actual| {
-                                idx = try appendStructMembers(allocator, members, idx, actual, options);
+                                idx = try appendStructMembers(allocator, members, idx, actual, options, depth);
                             }
                         } else if (ft_info == .@"struct") {
-                            idx = try appendStructMembers(allocator, members, idx, fv, options);
+                            idx = try appendStructMembers(allocator, members, idx, fv, options, depth);
                         }
                         continue;
                     }
@@ -1264,7 +1294,7 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                     }
                     const json_name = field_cfg.name orelse field.name;
                     members[idx].k = try allocator.dupe(u8, json_name);
-                    members[idx].v = try toValueInternal(allocator, fv, options);
+                    members[idx].v = try toValueInternal(allocator, fv, options, depth + 1);
                     idx += 1;
                 }
                 return .{ .obj = members };
@@ -1277,7 +1307,7 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
             } else {
                 var vals = try allocator.alloc(Value, arr.len);
                 for (&value, 0..) |item, i| {
-                    vals[i] = try toValueInternal(allocator, item, options);
+                    vals[i] = try toValueInternal(allocator, item, options, depth + 1);
                 }
                 return .{ .arr = vals };
             }
@@ -1285,7 +1315,9 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
 
         .pointer => |ptr| {
             switch (ptr.size) {
-                .one => return toValueInternal(allocator, value.*, options),
+                // Increment depth so a self-referential *T pointer chain is
+                // bounded by max_depth rather than recursing forever. See ASR-016.
+                .one => return toValueInternal(allocator, value.*, options, depth + 1),
                 .slice => {
                     // Check for nil/empty slice -> null conversion
                     if (value.len == 0 and options.format_nil_slice_as_null) {
@@ -1296,7 +1328,7 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                     } else {
                         var vals = try allocator.alloc(Value, value.len);
                         for (value, 0..) |item, i| {
-                            vals[i] = try toValueInternal(allocator, item, options);
+                            vals[i] = try toValueInternal(allocator, item, options, depth + 1);
                         }
                         return .{ .arr = vals };
                     }
@@ -1358,6 +1390,7 @@ fn appendStructMembers(
     start_idx: usize,
     value: anytype,
     options: EncodeOptions,
+    depth: u16,
 ) !usize {
     const T = @TypeOf(value);
     const s = @typeInfo(T).@"struct";
@@ -1370,15 +1403,15 @@ fn appendStructMembers(
 
         const fv = @field(value, field.name);
 
-        // Handle nested inline fields recursively
+        // Handle nested inline fields recursively (flattened, same depth)
         if (field_cfg.@"inline") {
             const ft_info = @typeInfo(field.type);
             if (ft_info == .optional) {
                 if (fv) |actual| {
-                    idx = try appendStructMembers(allocator, members, idx, actual, options);
+                    idx = try appendStructMembers(allocator, members, idx, actual, options, depth);
                 }
             } else if (ft_info == .@"struct") {
-                idx = try appendStructMembers(allocator, members, idx, fv, options);
+                idx = try appendStructMembers(allocator, members, idx, fv, options, depth);
             }
             continue;
         }
@@ -1389,7 +1422,7 @@ fn appendStructMembers(
 
         const json_name = field_cfg.name orelse field.name;
         members[idx].k = try allocator.dupe(u8, json_name);
-        members[idx].v = try toValueInternal(allocator, fv, options);
+        members[idx].v = try toValueInternal(allocator, fv, options, depth + 1);
         idx += 1;
     }
     return idx;
@@ -1515,6 +1548,24 @@ test "encode enum" {
     const s = try encode(std.testing.allocator, c, .{});
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings("\"green\"", s);
+}
+
+test "encode non-exhaustive enum with named tag" {
+    const Code = enum(u8) { a, b, _ };
+    const s = try encode(std.testing.allocator, Code.b, .{});
+    defer std.testing.allocator.free(s);
+    try std.testing.expectEqualStrings("\"b\"", s);
+}
+
+test "encode non-exhaustive enum value with no tag name" {
+    // QUAL-007: exercises the encodeInt fallback branch in encodeEnum for a
+    // non-exhaustive enum value that has no associated tag name. Previously this
+    // branch failed to compile because encodeInt was called with 2 args.
+    const Code = enum(u8) { a, b, _ };
+    const c: Code = @enumFromInt(99);
+    const s = try encode(std.testing.allocator, c, .{});
+    defer std.testing.allocator.free(s);
+    try std.testing.expectEqualStrings("99", s);
 }
 
 test "encode tagged union" {
@@ -2166,4 +2217,89 @@ test "encode fmt.Formatter with struct containing formatter" {
 
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"red\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"color\":\"#FF0000\"") != null);
+}
+
+// ============================================================================
+// Depth-limit / DoS-guard Tests (ASR-016)
+// ============================================================================
+
+/// Build a json.Value tree of nested single-element arrays of the given depth.
+fn buildNestedValueArray(a: std.mem.Allocator, depth: usize, leaf: Value) !Value {
+    var v = leaf;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        const arr = try a.alloc(Value, 1);
+        arr[0] = v;
+        v = .{ .arr = arr };
+    }
+    return v;
+}
+
+fn freeNestedValueArray(a: std.mem.Allocator, v: Value) void {
+    switch (v) {
+        .arr => |arr| {
+            for (arr) |item| freeNestedValueArray(a, item);
+            a.free(arr);
+        },
+        else => {},
+    }
+}
+
+test "encode deeply nested json.Value returns DepthLimit (no crash)" {
+    const a = std.testing.allocator;
+    const v = try buildNestedValueArray(a, 100_000, .null);
+    defer freeNestedValueArray(a, v);
+
+    try std.testing.expectError(error.DepthLimit, encode(a, v, .{}));
+}
+
+test "encode nested json.Value within depth limit succeeds" {
+    const a = std.testing.allocator;
+    const v = try buildNestedValueArray(a, 100, .{ .bool = true });
+    defer freeNestedValueArray(a, v);
+
+    const result = try encode(a, v, .{});
+    defer a.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "true") != null);
+}
+
+test "toValue deeply nested json.Value returns DepthLimit (no crash)" {
+    const a = std.testing.allocator;
+    const v = try buildNestedValueArray(a, 100_000, .null);
+    defer freeNestedValueArray(a, v);
+
+    // toValue builds an owned tree; on the error path it leaves the partial
+    // tree allocated (the caller owns cleanup), so use an arena to reclaim it.
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.DepthLimit, toValue(arena.allocator(), v, .{}));
+}
+
+test "encode cyclic pointer graph returns DepthLimit (no crash)" {
+    // ASR-016: a self-referential *T pointer chain would recurse forever and
+    // overflow the stack. The depth cap converts that into a clean error.
+    const Node = struct {
+        value: i32,
+        next: ?*const @This(),
+    };
+
+    var node: Node = .{ .value = 1, .next = null };
+    node.next = &node; // cycle: node -> node -> node -> ...
+
+    try std.testing.expectError(error.DepthLimit, encode(std.testing.allocator, node, .{}));
+}
+
+test "encode respects custom max_depth" {
+    const a = std.testing.allocator;
+    // 10 levels of nesting with a cap of 4 must fail.
+    const v = try buildNestedValueArray(a, 10, .null);
+    defer freeNestedValueArray(a, v);
+
+    try std.testing.expectError(error.DepthLimit, encode(a, v, .{ .max_depth = 4 }));
+
+    // The same tree is fine with a generous cap.
+    const result = try encode(a, v, .{ .max_depth = 64 });
+    defer a.free(result);
+    try std.testing.expect(result.len > 0);
 }

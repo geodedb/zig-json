@@ -16,6 +16,12 @@ const unicode = @import("unicode.zig");
 const Value = json.Value;
 const Member = json.Member;
 
+/// Maximum nesting depth enforced when emitting caller-built `Value` trees via
+/// `stringify`/`debugJson`. Mirrors the parser's default `max_depth` (256) so a
+/// programmatically-built deep or cyclic tree returns `error.DepthLimit`
+/// instead of overflowing the stack (uncatchable abort). See ASR-016.
+pub const default_max_depth: u16 = 256;
+
 /// Streaming JSON encoder options
 pub const EncoderOptions = struct {
     /// Indentation string (null for minified output)
@@ -24,6 +30,10 @@ pub const EncoderOptions = struct {
     escape_slash: bool = false,
     /// Escape non-ASCII characters as \uXXXX
     escape_non_ascii: bool = false,
+    /// Maximum nesting depth for `writeValue`. A caller-built `Value` tree that
+    /// nests deeper than this returns `error.DepthLimit` rather than overflowing
+    /// the stack. Bounds deep and cyclic trees alike. See ASR-016.
+    max_depth: u16 = default_max_depth,
 };
 
 /// Streaming JSON encoder for incremental generation
@@ -38,7 +48,12 @@ pub fn Encoder(comptime WriterType: type) type {
         depth: usize,
 
         const Self = @This();
-        const Error = error{WriteFailed} || std.mem.Allocator.Error;
+        /// Errors:
+        /// - WriteFailed: underlying writer failed
+        /// - InvalidState: state-machine misuse (e.g. closing an unopened
+        ///   container or a mismatched begin/end pair)
+        /// - DepthLimit: nesting in a writeValue() tree exceeded max_depth
+        const Error = error{ WriteFailed, InvalidState, DepthLimit } || std.mem.Allocator.Error;
 
         const StateKind = enum { object, array };
         const State = struct {
@@ -72,11 +87,11 @@ pub fn Encoder(comptime WriterType: type) type {
 
         /// End the current JSON object
         pub fn endObject(self: *Self) Error!void {
-            if (self.state_stack.items.len == 0) return error.OutOfMemory; // Invalid state
+            if (self.state_stack.items.len == 0) return error.InvalidState; // Closing an unopened container
             const last_idx = self.state_stack.items.len - 1;
             const state = self.state_stack.items[last_idx];
+            if (state.kind != .object) return error.InvalidState; // Mismatched begin/end pair
             self.state_stack.items.len = last_idx;
-            if (state.kind != .object) return error.OutOfMemory; // Mismatched end
             self.depth -= 1;
             if (!state.first) {
                 try self.writeNewline();
@@ -95,11 +110,11 @@ pub fn Encoder(comptime WriterType: type) type {
 
         /// End the current JSON array
         pub fn endArray(self: *Self) Error!void {
-            if (self.state_stack.items.len == 0) return error.OutOfMemory; // Invalid state
+            if (self.state_stack.items.len == 0) return error.InvalidState; // Closing an unopened container
             const last_idx = self.state_stack.items.len - 1;
             const state = self.state_stack.items[last_idx];
+            if (state.kind != .array) return error.InvalidState; // Mismatched begin/end pair
             self.state_stack.items.len = last_idx;
-            if (state.kind != .array) return error.OutOfMemory; // Mismatched end
             self.depth -= 1;
             if (!state.first) {
                 try self.writeNewline();
@@ -169,6 +184,10 @@ pub fn Encoder(comptime WriterType: type) type {
         }
 
         /// Write a json.Value
+        ///
+        /// A caller-built `Value` tree that nests deeper than
+        /// `options.max_depth` (or contains a cycle) returns `error.DepthLimit`
+        /// instead of overflowing the stack. See ASR-016.
         pub fn writeValue(self: *Self, value: Value) Error!void {
             switch (value) {
                 .null => try self.writeNull(),
@@ -176,6 +195,9 @@ pub fn Encoder(comptime WriterType: type) type {
                 .num => |n| try self.writeRaw(n.lexeme),
                 .str => |s| try self.writeString(s),
                 .arr => |arr| {
+                    // self.depth tracks open-container nesting; beginArray has
+                    // not yet incremented it, so guard before descending.
+                    if (self.depth >= self.options.max_depth) return error.DepthLimit;
                     try self.beginArray();
                     for (arr) |item| {
                         try self.writeValue(item);
@@ -183,6 +205,7 @@ pub fn Encoder(comptime WriterType: type) type {
                     try self.endArray();
                 },
                 .obj => |obj| {
+                    if (self.depth >= self.options.max_depth) return error.DepthLimit;
                     try self.beginObject();
                     for (obj) |m| {
                         try self.writeKey(m.k);
@@ -311,36 +334,47 @@ pub fn encoder(allocator: std.mem.Allocator, writer: anytype, options: EncoderOp
 }
 
 /// Stringify a value to minified JSON
+///
+/// Returns `error.DepthLimit` if the `Value` tree nests deeper than
+/// `default_max_depth`. This bounds deep or cyclic caller-built trees so they
+/// fail with a catchable error instead of overflowing the stack. See ASR-016.
 pub fn stringify(a: std.mem.Allocator, v: Value) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(a);
-    try emitValue(a, &buf, v, false);
+    try emitValue(a, &buf, v, false, 0);
     return buf.toOwnedSlice(a);
 }
 
 /// Debug JSON: sorted keys, non-ASCII escaped
+///
+/// Returns `error.DepthLimit` if the `Value` tree nests deeper than
+/// `default_max_depth` (see `stringify`).
 pub fn debugJson(a: std.mem.Allocator, v: Value) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(a);
-    try emitValue(a, &buf, v, true);
+    try emitValue(a, &buf, v, true, 0);
     return buf.toOwnedSlice(a);
 }
 
-fn emitValue(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value, debug_mode: bool) !void {
+fn emitValue(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value, debug_mode: bool, depth: u16) !void {
     switch (v) {
         .null => try buf.appendSlice(a, "null"),
         .bool => |b| try buf.appendSlice(a, if (b) "true" else "false"),
         .num => |n| try buf.appendSlice(a, n.lexeme),
         .str => |s| try emitString(a, buf, s, debug_mode),
         .arr => |arr| {
+            // Bound recursion over runtime-sized, caller-built trees (and
+            // cyclic pointer graphs) before descending. See ASR-016.
+            if (depth >= default_max_depth) return error.DepthLimit;
             try buf.append(a, '[');
             for (arr, 0..) |item, i| {
                 if (i > 0) try buf.append(a, ',');
-                try emitValue(a, buf, item, debug_mode);
+                try emitValue(a, buf, item, debug_mode, depth + 1);
             }
             try buf.append(a, ']');
         },
         .obj => |obj| {
+            if (depth >= default_max_depth) return error.DepthLimit;
             try buf.append(a, '{');
 
             if (debug_mode) {
@@ -359,14 +393,14 @@ fn emitValue(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value, debug_mode
                     if (i > 0) try buf.append(a, ',');
                     try emitString(a, buf, m.k, debug_mode);
                     try buf.append(a, ':');
-                    try emitValue(a, buf, m.v, debug_mode);
+                    try emitValue(a, buf, m.v, debug_mode, depth + 1);
                 }
             } else {
                 for (obj, 0..) |m, i| {
                     if (i > 0) try buf.append(a, ',');
                     try emitString(a, buf, m.k, debug_mode);
                     try buf.append(a, ':');
-                    try emitValue(a, buf, m.v, debug_mode);
+                    try emitValue(a, buf, m.v, debug_mode, depth + 1);
                 }
             }
 
@@ -519,6 +553,91 @@ test "debugJson escapes emoji as surrogate pair" {
     try std.testing.expectEqualStrings("\"\\uD83D\\uDE00\"", result);
 }
 
+/// Build a `Value` tree of nested single-element arrays `[[[...x...]]]` of the
+/// given depth (depth == 0 returns the leaf). Caller owns the returned tree and
+/// must free it with `freeNestedArray`.
+fn buildNestedArray(a: std.mem.Allocator, depth: usize, leaf: Value) !Value {
+    var v = leaf;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        const arr = try a.alloc(Value, 1);
+        arr[0] = v;
+        v = .{ .arr = arr };
+    }
+    return v;
+}
+
+fn freeNestedArray(a: std.mem.Allocator, v: Value) void {
+    switch (v) {
+        .arr => |arr| {
+            for (arr) |item| freeNestedArray(a, item);
+            a.free(arr);
+        },
+        else => {},
+    }
+}
+
+test "stringify deeply nested array returns DepthLimit (no crash)" {
+    // ASR-016: a 100000-deep caller-built tree must return a catchable error,
+    // not overflow the stack.
+    const a = std.testing.allocator;
+    const v = try buildNestedArray(a, 100_000, .null);
+    defer freeNestedArray(a, v);
+
+    try std.testing.expectError(error.DepthLimit, stringify(a, v));
+}
+
+test "debugJson deeply nested array returns DepthLimit (no crash)" {
+    const a = std.testing.allocator;
+    const v = try buildNestedArray(a, 100_000, .null);
+    defer freeNestedArray(a, v);
+
+    try std.testing.expectError(error.DepthLimit, debugJson(a, v));
+}
+
+test "stringify within depth limit still serializes" {
+    const a = std.testing.allocator;
+    // 200 levels of nesting is comfortably under default_max_depth (256).
+    const v = try buildNestedArray(a, 200, .{ .bool = true });
+    defer freeNestedArray(a, v);
+
+    const result = try stringify(a, v);
+    defer a.free(result);
+
+    // 200 '[' then "true" then 200 ']'.
+    try std.testing.expectEqual(@as(usize, 200 + 4 + 200), result.len);
+    try std.testing.expect(std.mem.indexOf(u8, result, "true") != null);
+}
+
+test "streaming encoder writeValue deeply nested returns DepthLimit (no crash)" {
+    const a = std.testing.allocator;
+    const v = try buildNestedArray(a, 100_000, .null);
+    defer freeNestedArray(a, v);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+
+    var enc = encoder(a, &aw.writer, .{});
+    defer enc.deinit();
+
+    try std.testing.expectError(error.DepthLimit, enc.writeValue(v));
+}
+
+test "streaming encoder writeValue within depth limit serializes" {
+    const a = std.testing.allocator;
+    const v = try buildNestedArray(a, 100, .{ .bool = true });
+    defer freeNestedArray(a, v);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+
+    var enc = encoder(a, &aw.writer, .{});
+    defer enc.deinit();
+
+    try enc.writeValue(v);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "true") != null);
+}
+
 test "streaming encoder simple object" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
@@ -606,4 +725,46 @@ test "streaming encoder writeValue" {
     try enc.writeValue(.{ .obj = &members });
 
     try std.testing.expectEqualStrings("{\"key\":\"value\"}", aw.written());
+}
+
+test "streaming encoder endObject on empty stack returns InvalidState" {
+    // QUAL-014: state-machine misuse must be distinguishable from OutOfMemory.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
+    defer enc.deinit();
+
+    try std.testing.expectError(error.InvalidState, enc.endObject());
+}
+
+test "streaming encoder endArray on empty stack returns InvalidState" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
+    defer enc.deinit();
+
+    try std.testing.expectError(error.InvalidState, enc.endArray());
+}
+
+test "streaming encoder mismatched container end returns InvalidState" {
+    // Open an object but try to close it as an array (and vice versa).
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
+    defer enc.deinit();
+
+    try enc.beginObject();
+    try std.testing.expectError(error.InvalidState, enc.endArray());
+
+    var aw2: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw2.deinit();
+
+    var enc2 = encoder(std.testing.allocator, &aw2.writer, .{});
+    defer enc2.deinit();
+
+    try enc2.beginArray();
+    try std.testing.expectError(error.InvalidState, enc2.endObject());
 }
