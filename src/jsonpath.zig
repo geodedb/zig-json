@@ -474,6 +474,9 @@ fn executeQuery(
                 if (current == .arr) {
                     const arr = current.arr;
                     for (indices) |idx| {
+                        // Guard against i64 min: -idx would overflow. Such an
+                        // index is always out of range, so treat it as no match.
+                        if (idx == std.math.minInt(i64)) continue;
                         const actual_idx: usize = if (idx < 0)
                             if (@as(usize, @intCast(-idx)) > arr.len) continue else arr.len - @as(usize, @intCast(-idx))
                         else
@@ -505,6 +508,9 @@ fn executeQuery(
                     const arr = current.arr;
                     for (names) |name| {
                         if (std.fmt.parseInt(i64, name, 10)) |idx| {
+                            // Guard against i64 min: -idx would overflow. Such an
+                            // index is always out of range, so skip it.
+                            if (idx == std.math.minInt(i64)) continue;
                             const actual_idx: usize = if (idx < 0)
                                 if (@as(usize, @intCast(-idx)) > arr.len) continue else arr.len - @as(usize, @intCast(-idx))
                             else
@@ -593,12 +599,14 @@ fn evaluateFilter(item: Value, expr: []const u8) bool {
     // Skip leading whitespace
     while (e.len > 0 and e[0] == ' ') e = e[1..];
 
-    // Must start with @
-    if (e.len == 0 or e[0] != '@') return true; // Unknown filter passes
+    // Must start with @. Fail closed (GAP-005): an unrecognized predicate,
+    // including unsupported function extensions like length()/count()/match(),
+    // must not silently match every item (that would be a validation bypass).
+    if (e.len == 0 or e[0] != '@') return false;
     e = e[1..];
 
     // Must have .field
-    if (e.len == 0 or e[0] != '.') return true;
+    if (e.len == 0 or e[0] != '.') return false;
     e = e[1..];
 
     // Read field name
@@ -636,7 +644,8 @@ fn evaluateFilter(item: Value, expr: []const u8) bool {
         }
     }
 
-    if (op.len == 0) return true;
+    // No recognized comparison operator: fail closed rather than match-all.
+    if (op.len == 0) return false;
 
     // Skip whitespace
     while (e.len > 0 and e[0] == ' ') e = e[1..];
@@ -891,4 +900,77 @@ test "jsonpath union negative index" {
     try std.testing.expectEqual(@as(usize, 2), result.values.len);
     try std.testing.expectEqualStrings("1", result.values[0].num.lexeme);
     try std.testing.expectEqualStrings("5", result.values[1].num.lexeme);
+}
+
+// ASR-007: negating an attacker-controlled i64 index parsed from the path
+// overflows when idx == std.math.minInt(i64) (since -minInt(i64) is not
+// representable), which previously panicked. Such an index is always out of
+// range for any real array, so it must be treated as "no match" instead of
+// aborting.
+
+test "jsonpath single index i64 min no crash" {
+    const allocator = std.testing.allocator;
+
+    const input = "[1, 2, 3, 4, 5]";
+    var err = json.ParseError.init();
+    var doc = try json.parse(allocator, input, .{}, &err);
+    defer doc.deinit();
+
+    // Single-index path uses addition and is already safe, but assert it too.
+    var result = try query(allocator, doc.root, "$[-9223372036854775808]");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.values.len);
+}
+
+test "jsonpath union index i64 min no crash" {
+    const allocator = std.testing.allocator;
+
+    const input = "[1, 2, 3, 4, 5]";
+    var err = json.ParseError.init();
+    var doc = try json.parse(allocator, input, .{}, &err);
+    defer doc.deinit();
+
+    // The union form previously panicked on -idx overflow for i64 min.
+    var result = try query(allocator, doc.root, "$[-9223372036854775808,0]");
+    defer result.deinit();
+
+    // The out-of-range min index yields no match; index 0 still matches.
+    try std.testing.expectEqual(@as(usize, 1), result.values.len);
+    try std.testing.expectEqualStrings("1", result.values[0].num.lexeme);
+}
+
+test "jsonpath normal negative index still works" {
+    const allocator = std.testing.allocator;
+
+    const input = "[1, 2, 3]";
+    var err = json.ParseError.init();
+    var doc = try json.parse(allocator, input, .{}, &err);
+    defer doc.deinit();
+
+    var result = try query(allocator, doc.root, "$[-1]");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.values.len);
+    try std.testing.expectEqualStrings("3", result.values[0].num.lexeme);
+}
+
+// GAP-005: an unrecognized filter function (e.g. length()/count()/match())
+// must fail closed (no match) rather than silently passing every item, which
+// would be a validation-bypass-style surprise.
+test "jsonpath unknown filter function fails closed" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\[{"name":"Alice"},{"name":"Bob"}]
+    ;
+    var err = json.ParseError.init();
+    var doc = try json.parse(allocator, input, .{}, &err);
+    defer doc.deinit();
+
+    var result = try query(allocator, doc.root, "$[?(length(@.name) > 5)]");
+    defer result.deinit();
+
+    // Unsupported function predicate => no items match (fail closed).
+    try std.testing.expectEqual(@as(usize, 0), result.values.len);
 }
