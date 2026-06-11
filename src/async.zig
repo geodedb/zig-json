@@ -16,6 +16,7 @@
 const std = @import("std");
 const json = @import("json.zig");
 const tokenizer_mod = @import("tokenizer.zig");
+const number_mod = @import("number.zig");
 
 /// Async parser state
 pub const AsyncState = enum {
@@ -96,10 +97,14 @@ pub const AsyncParseOptions = struct {
     max_depth: u16 = 256,
     /// Yield every N bytes processed
     yield_interval: usize = 4096,
-    /// Maximum string length
+    /// Maximum decoded string length (enforced by the string scanner; a string
+    /// whose decoded length would exceed this fails with `invalid_string`).
     max_string_len: usize = 1024 * 1024,
-    /// Enable JSON5 parsing
-    json5: bool = false,
+    // NOTE: a `json5` option was removed here. The async parser does not
+    // implement JSON5 (comments, single-quoted/unquoted keys, hex/leading-dot
+    // numbers, Infinity/NaN), and the field was never read -- advertising it
+    // would silently do nothing. Use the synchronous `json.parse` with
+    // `ParseOptions.json5 = true` for JSON5 input.
     /// Total input size (for progress reporting)
     total_size: ?usize = null,
     /// Error recovery mode
@@ -704,6 +709,14 @@ pub const AsyncParser = struct {
                 return error.InvalidString;
             }
 
+            // Enforce the configured maximum decoded string length. This caps
+            // unbounded buffer growth from a single oversized string (a DoS
+            // guard) the same way the synchronous tokenizer does. Checked on the
+            // decoded length so escape sequences cannot bypass the limit.
+            if (result.items.len >= self.opts.max_string_len) {
+                return error.InvalidString;
+            }
+
             if (c == '\\') {
                 self.advance();
                 if (self.pos >= self.input.items.len) {
@@ -816,13 +829,28 @@ pub const AsyncParser = struct {
             }
         }
 
-        const lexeme = self.input.items[start..self.pos];
-        return .{ .num = .{
-            .lexeme = lexeme,
-            .sign = if (lexeme[0] == '-') @as(i8, -1) else @as(i8, 1),
-            .digits = lexeme,
-            .exp10 = 0,
-        } };
+        // `lexeme` points into `self.input`, which is freed when the parser is
+        // deinitialized (and the input buffer may also be reallocated as more
+        // data arrives). Build a canonically-normalized `Number` whose storage
+        // is owned independently of the input buffer:
+        //   * `digits`/`exp10` are produced by the SAME routine the main parser
+        //     uses (`number.parseNumber`), so async- and main-parser numbers
+        //     agree under `compare`/`isInteger`/`Value.eql` (QUAL-003).
+        //   * `lexeme` is duped so it survives parser teardown.
+        // Both allocations are released by this module's `freeValue` for `.num`.
+        const lexeme_slice = self.input.items[start..self.pos];
+        const lexeme_owned = self.allocator.dupe(u8, lexeme_slice) catch {
+            return error.OutOfMemory;
+        };
+        errdefer self.allocator.free(lexeme_owned);
+
+        // `number.parseNumber` allocates and normalizes `digits`; it derives
+        // `sign`/`exp10` from the lexeme. We feed it the owned lexeme so the
+        // returned `Number.lexeme` and our `lexeme_owned` are the same buffer.
+        const num = number_mod.parseNumber(lexeme_owned, self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return .{ .num = num };
     }
 
     fn parseArray(self: *Self) InternalError!json.Value {
@@ -997,9 +1025,19 @@ pub const AsyncParser = struct {
 };
 
 /// Free a JSON value and all its children
-fn freeValue(allocator: std.mem.Allocator, value: json.Value) void {
+///
+/// Note: unlike the public `json.freeValue`, async-produced `.num` values own
+/// two heap allocations (`lexeme` and the normalized `digits`, both built in
+/// `AsyncParser.parseNumber` so they outlive the parser's input buffer), so this
+/// module's free path releases them. This is the correct freer for values
+/// returned by `parseAsync`.
+pub fn freeValue(allocator: std.mem.Allocator, value: json.Value) void {
     switch (value) {
-        .null, .bool, .num => {},
+        .null, .bool => {},
+        .num => |n| {
+            allocator.free(n.digits);
+            allocator.free(n.lexeme);
+        },
         .str => |s| allocator.free(s),
         .arr => |arr| {
             for (arr) |item| {
@@ -1021,8 +1059,20 @@ fn freeValue(allocator: std.mem.Allocator, value: json.Value) void {
 // Async Iterator Interface
 // =============================================================================
 
-/// Async JSON value iterator
-/// Yields one value at a time from an array or object stream
+/// Async JSON value iterator.
+///
+/// Yields one value at a time from a parsed top-level value:
+///   * array  -> yields each element in order;
+///   * object -> yields each member's value in order;
+///   * scalar -> yields that single value once.
+///
+/// Usage: feed the complete input via `addInput`, then call `next` until it
+/// returns `null`. The first `next` call drives the underlying parser to
+/// completion and caches the parsed root; subsequent calls walk the cached root.
+///
+/// Ownership: yielded values are BORROWED from the iterator's cached root. The
+/// iterator owns all parsed storage and frees it in `deinit`; callers must not
+/// free yielded values and must not use them after `deinit`.
 pub const AsyncIterator = struct {
     const Self = @This();
 
@@ -1030,6 +1080,11 @@ pub const AsyncIterator = struct {
     in_container: bool,
     container_type: ?ContainerType,
     items_yielded: usize,
+    /// Cached parsed root (populated lazily on the first `next` call).
+    root: ?json.Value,
+    /// Whether parsing has been attempted (so we don't reparse after a failure
+    /// or after consuming the single scalar value).
+    parsed: bool,
 
     const ContainerType = enum { array, object };
 
@@ -1039,10 +1094,16 @@ pub const AsyncIterator = struct {
             .in_container = false,
             .container_type = null,
             .items_yielded = 0,
+            .root = null,
+            .parsed = false,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.root) |r| {
+            freeValue(self.parser.allocator, r);
+            self.root = null;
+        }
         self.parser.deinit();
     }
 
@@ -1050,11 +1111,62 @@ pub const AsyncIterator = struct {
         try self.parser.addInput(data);
     }
 
-    /// Get the next value from the stream
+    /// Drive the parser to completion once and cache the root value.
+    /// Returns true if a root value is available, false otherwise.
+    fn ensureParsed(self: *Self) bool {
+        if (self.parsed) return self.root != null;
+        self.parsed = true;
+
+        self.parser.endInput();
+
+        var result = self.parser.parse();
+        // Run the incremental state machine to completion. `need_data` here
+        // means the input ended mid-value (incomplete), which we treat as "no
+        // values to yield".
+        while (true) {
+            switch (result) {
+                .completed => |v| {
+                    self.root = v;
+                    if (v == .arr) {
+                        self.in_container = true;
+                        self.container_type = .array;
+                    } else if (v == .obj) {
+                        self.in_container = true;
+                        self.container_type = .object;
+                    }
+                    return true;
+                },
+                .yielded => result = self.parser.parse(),
+                .need_data, .err => return false,
+            }
+        }
+    }
+
+    /// Get the next value from the stream, or `null` when exhausted.
     pub fn next(self: *Self) ?json.Value {
-        _ = self;
-        // Simplified implementation - full implementation would track state
-        return null;
+        if (!self.ensureParsed()) return null;
+        const root = self.root.?;
+
+        switch (root) {
+            .arr => |arr| {
+                if (self.items_yielded >= arr.len) return null;
+                const v = arr[self.items_yielded];
+                self.items_yielded += 1;
+                return v;
+            },
+            .obj => |obj| {
+                if (self.items_yielded >= obj.len) return null;
+                const v = obj[self.items_yielded].v;
+                self.items_yielded += 1;
+                return v;
+            },
+            else => {
+                // Scalar root: yield it exactly once.
+                if (self.items_yielded >= 1) return null;
+                self.items_yielded += 1;
+                return root;
+            },
+        }
     }
 };
 
@@ -1062,7 +1174,14 @@ pub const AsyncIterator = struct {
 // Convenience Functions
 // =============================================================================
 
-/// Parse JSON asynchronously with a callback for progress updates
+/// Parse JSON asynchronously with a callback for progress updates.
+///
+/// Ownership: the returned value owns its heap allocations independently of the
+/// (now-destroyed) internal parser. Strings own their bytes, and numbers own
+/// both their normalized `digits` and their `lexeme`. Free the returned value
+/// with `async.freeValue` (the public `json.freeValue` frees strings/containers
+/// but treats `.num` as allocation-free, which is correct for the main parser's
+/// arena-backed numbers but NOT for async-produced numbers).
 pub fn parseAsync(
     allocator: std.mem.Allocator,
     input: []const u8,
@@ -1227,7 +1346,13 @@ test "parseAsync convenience function" {
     const allocator = std.testing.allocator;
 
     const value = try parseAsync(allocator, "42", .{}, null);
+    defer freeValue(allocator, value);
     try std.testing.expect(value == .num);
+    // The returned number is canonically normalized and owns its storage
+    // (independent of the now-deinitialized parser's input buffer).
+    try std.testing.expectEqualStrings("42", value.num.digits);
+    try std.testing.expectEqual(@as(i32, 0), value.num.exp10);
+    try std.testing.expectEqualStrings("42", value.num.lexeme);
 }
 
 test "AsyncParser skipToNextValue" {
@@ -1313,4 +1438,227 @@ test "AsyncParser error recovery" {
         try std.testing.expect(!recovered);
         try std.testing.expectEqual(@as(usize, 0), parser.errors_recovered);
     }
+}
+
+// QUAL-003 (High, correctness): the async number path must build a canonically
+// normalized `Number` (bare significant digits in `.digits`, decimal exponent in
+// `.exp10`) that AGREES with the main `json.parse` path. Previously async set
+// `.digits = lexeme` (including sign/'.'/'e') and `.exp10 = 0`, so `compare` /
+// `isInteger` / `Value.eql` misbehaved (e.g. "1e2" compared wrong, "1.5" looked
+// integer). This test parses the same numbers via BOTH paths and asserts the
+// async-produced `Number` compares EQUAL to the main-parser `Number`.
+test "AsyncParser number agrees with main parser (QUAL-003)" {
+    const allocator = std.testing.allocator;
+
+    const cases = [_][]const u8{ "1e2", "1.5", "-3.25e1", "0", "42", "100", "3.14", "-0.0", "1E10" };
+
+    for (cases) |input| {
+        // Async path.
+        var parser = AsyncParser.init(allocator, .{});
+        defer parser.deinit();
+        try parser.addInput(input);
+        parser.endInput();
+
+        const result = parser.parse();
+        try std.testing.expect(result == .completed);
+        const async_val = result.completed;
+        defer freeValue(allocator, async_val);
+        try std.testing.expect(async_val == .num);
+
+        // Main parser path.
+        var perr: json.ParseError = undefined;
+        var doc = try json.parse(allocator, input, .{}, &perr);
+        defer doc.deinit();
+        try std.testing.expect(doc.root == .num);
+
+        // The two normalized numbers must compare EQUAL (and Value.eql agrees).
+        try std.testing.expectEqual(
+            @as(i32, 0),
+            number_mod.compare(async_val.num, doc.root.num),
+        );
+        try std.testing.expect(async_val.eql(doc.root));
+
+        // The async Number is canonically normalized: digits/exp10 match the
+        // main parser's, not the raw lexeme with exp10 == 0.
+        try std.testing.expectEqualStrings(doc.root.num.digits, async_val.num.digits);
+        try std.testing.expectEqual(doc.root.num.exp10, async_val.num.exp10);
+        try std.testing.expectEqual(doc.root.num.sign, async_val.num.sign);
+    }
+}
+
+// QUAL-003: isInteger must be correct on async-produced numbers.
+// "1e2" (== 100) is an integer; "1.5" is not. Before the fix, "1e2" had
+// exp10 == 0 with digits "1e2" (wrong) and "1.5" had digits "1.5" with
+// exp10 == 0 so isInteger returned true (wrong).
+test "AsyncParser isInteger correct on produced numbers (QUAL-003)" {
+    const allocator = std.testing.allocator;
+
+    {
+        var parser = AsyncParser.init(allocator, .{});
+        defer parser.deinit();
+        try parser.addInput("1e2");
+        parser.endInput();
+        const result = parser.parse();
+        try std.testing.expect(result == .completed);
+        defer freeValue(allocator, result.completed);
+        try std.testing.expect(result.completed == .num);
+        try std.testing.expect(result.completed.num.isInteger());
+    }
+
+    {
+        var parser = AsyncParser.init(allocator, .{});
+        defer parser.deinit();
+        try parser.addInput("1.5");
+        parser.endInput();
+        const result = parser.parse();
+        try std.testing.expect(result == .completed);
+        defer freeValue(allocator, result.completed);
+        try std.testing.expect(result.completed == .num);
+        try std.testing.expect(!result.completed.num.isInteger());
+    }
+}
+
+// QUAL-003: numbers nested inside async-parsed containers must also be
+// normalized (exercises the container free path through freeValue too).
+test "AsyncParser normalizes numbers inside containers (QUAL-003)" {
+    const allocator = std.testing.allocator;
+
+    var parser = AsyncParser.init(allocator, .{});
+    defer parser.deinit();
+    try parser.addInput("[1e2, 1.5, -3.25e1]");
+    parser.endInput();
+
+    // Drive the parser to completion (containers complete via continueContainer).
+    var result = parser.parse();
+    while (result == .need_data or result == .yielded) {
+        result = parser.parse();
+    }
+    try std.testing.expect(result == .completed);
+    const arr_val = result.completed;
+    defer freeValue(allocator, arr_val);
+    try std.testing.expect(arr_val == .arr);
+    try std.testing.expectEqual(@as(usize, 3), arr_val.arr.len);
+
+    // Compare each element against the main parser.
+    const expected = [_][]const u8{ "1e2", "1.5", "-3.25e1" };
+    for (expected, arr_val.arr) |input, got| {
+        try std.testing.expect(got == .num);
+        var perr: json.ParseError = undefined;
+        var doc = try json.parse(allocator, input, .{}, &perr);
+        defer doc.deinit();
+        try std.testing.expectEqual(@as(i32, 0), number_mod.compare(got.num, doc.root.num));
+    }
+    // 1e2 is integer, 1.5 is not.
+    try std.testing.expect(arr_val.arr[0].num.isInteger());
+    try std.testing.expect(!arr_val.arr[1].num.isInteger());
+}
+
+// QUAL-016 / DoS guard: max_string_len must be enforced by the async string
+// scanner. A string longer than the configured limit must fail rather than
+// being accepted (previously the option was declared but never read).
+test "AsyncParser enforces max_string_len (QUAL-016)" {
+    const allocator = std.testing.allocator;
+
+    // 100-char string with max_string_len = 8 -> invalid_string error.
+    {
+        var input: std.ArrayList(u8) = .empty;
+        defer input.deinit(allocator);
+        try input.append(allocator, '"');
+        try input.appendNTimes(allocator, 'a', 100);
+        try input.append(allocator, '"');
+
+        var parser = AsyncParser.init(allocator, .{ .max_string_len = 8 });
+        defer parser.deinit();
+        try parser.addInput(input.items);
+        parser.endInput();
+
+        const result = parser.parse();
+        try std.testing.expect(result == .err);
+        try std.testing.expectEqual(ParseError.ErrorCode.invalid_string, result.err.code);
+    }
+
+    // A short string within the limit still parses.
+    {
+        var parser = AsyncParser.init(allocator, .{ .max_string_len = 8 });
+        defer parser.deinit();
+        try parser.addInput("\"short\"");
+        parser.endInput();
+
+        const result = parser.parse();
+        try std.testing.expect(result == .completed);
+        try std.testing.expect(result.completed == .str);
+        try std.testing.expectEqualStrings("short", result.completed.str);
+        allocator.free(result.completed.str);
+    }
+}
+
+// GAP-008: AsyncIterator.next must actually yield values instead of always
+// returning null. It walks the parsed top-level value: array elements, object
+// member values, or a single scalar.
+test "AsyncIterator yields array elements (GAP-008)" {
+    const allocator = std.testing.allocator;
+
+    var iter = AsyncIterator.init(allocator, .{});
+    defer iter.deinit();
+    try iter.addInput("[1, 2, 3]");
+
+    var count: usize = 0;
+    var sum: usize = 0;
+    while (iter.next()) |v| {
+        try std.testing.expect(v == .num);
+        // Each element is a canonically-normalized integer.
+        try std.testing.expect(v.num.isInteger());
+        const digit = v.num.digits[0] - '0';
+        sum += digit;
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expectEqual(@as(usize, 6), sum);
+
+    // Exhausted iterator keeps returning null.
+    try std.testing.expect(iter.next() == null);
+}
+
+test "AsyncIterator yields object member values (GAP-008)" {
+    const allocator = std.testing.allocator;
+
+    var iter = AsyncIterator.init(allocator, .{});
+    defer iter.deinit();
+    try iter.addInput("{\"a\": 1, \"b\": \"x\"}");
+
+    const first = iter.next();
+    try std.testing.expect(first != null);
+    try std.testing.expect(first.? == .num);
+
+    const second = iter.next();
+    try std.testing.expect(second != null);
+    try std.testing.expect(second.? == .str);
+    try std.testing.expectEqualStrings("x", second.?.str);
+
+    try std.testing.expect(iter.next() == null);
+}
+
+test "AsyncIterator yields a single scalar once (GAP-008)" {
+    const allocator = std.testing.allocator;
+
+    var iter = AsyncIterator.init(allocator, .{});
+    defer iter.deinit();
+    try iter.addInput("42");
+
+    const v = iter.next();
+    try std.testing.expect(v != null);
+    try std.testing.expect(v.? == .num);
+    try std.testing.expectEqualStrings("42", v.?.num.digits);
+
+    try std.testing.expect(iter.next() == null);
+}
+
+test "AsyncIterator on incomplete input yields nothing (GAP-008)" {
+    const allocator = std.testing.allocator;
+
+    var iter = AsyncIterator.init(allocator, .{});
+    defer iter.deinit();
+    try iter.addInput("[1, 2"); // never closed
+
+    try std.testing.expect(iter.next() == null);
 }
