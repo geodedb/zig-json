@@ -27,7 +27,10 @@ pub const tokenizer_mod = @import("tokenizer.zig");
 pub const time_mod = @import("time.zig");
 pub const unicode = @import("unicode.zig");
 pub const number_mod = @import("number.zig");
-pub const uri_mod = @import("uri.zig");
+/// URI parsing/resolution surface used by the schema validator ($ref / $id
+/// resolution). Backed by the external `uri` dependency so callers of
+/// `json.uri_mod` get the exact same implementation the validator uses.
+pub const uri_mod = @import("uri");
 pub const pointer_mod = @import("pointer.zig");
 pub const regex = @import("regex_ecma262.zig");
 pub const schema_mod = @import("schema.zig");
