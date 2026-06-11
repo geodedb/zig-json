@@ -557,10 +557,47 @@ fn compileNode(a: std.mem.Allocator, v: Value, location: []const u8, opts: Schem
     }
 }
 
-fn parseIntKeyword(n: Number) u64 {
-    const val = std.fmt.parseInt(i64, n.digits, 10) catch return 0;
-    if (val < 0) return 0;
-    return @intCast(val);
+/// Parse a JSON Schema numeric keyword that must be a non-negative integer
+/// (minItems, maxItems, minLength, maxLength, minProperties, maxProperties,
+/// minContains, maxContains).
+///
+/// The value is a normalized `Number` (sign * digits * 10^exp10), so the
+/// magnitude implied by `exp10` MUST be honored: `1e2` is 100, not 1. A value
+/// that is negative, fractional, or larger than a u64 can hold is not a valid
+/// non-negative integer for these keywords; rather than silently coercing it to
+/// a wrong bound (the old behavior returned 0, turning the constraint into a
+/// no-op or an incorrect limit), we return `null` so the caller leaves the
+/// keyword unset and the constraint is simply not applied.
+fn parseIntKeyword(n: Number) ?u64 {
+    // Negative values are not valid non-negative integers.
+    if (n.sign < 0) {
+        // The normalized zero is always +0, so a negative sign means a real
+        // negative magnitude.
+        return null;
+    }
+
+    // Reject fractional values (e.g. 1.5): a non-integer is not a valid bound.
+    if (!number_mod.isInteger(n)) return null;
+
+    // digits * 10^exp10, with exp10 >= -leadingFractionalZeros. Because the
+    // value is an integer, any negative exp10 only cancels trailing zeros in
+    // `digits`; build the integer magnitude with overflow checks.
+    var value: u64 = std.fmt.parseInt(u64, n.digits, 10) catch return null;
+
+    var exp = n.exp10;
+    // Negative exponent on an integer means `digits` has trailing zeros that
+    // the exponent removes; divide them back out exactly.
+    while (exp < 0) : (exp += 1) {
+        // isInteger guarantees value % 10 == 0 here, but guard defensively.
+        if (value % 10 != 0) return null;
+        value /= 10;
+    }
+    // Positive exponent scales the magnitude up; do so with overflow checks.
+    while (exp > 0) : (exp -= 1) {
+        value = std.math.mul(u64, value, 10) catch return null;
+    }
+
+    return value;
 }
 
 fn parseTypeKeyword(a: std.mem.Allocator, v: Value) !?[]const []const u8 {
@@ -1055,7 +1092,17 @@ fn navigateSchema(node: *const SchemaNode, segment: []const u8) ?*const SchemaNo
 }
 
 fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, inst_ptr: []const u8, depth: u16) !void {
-    if (depth > ctx.opts.max_ref_depth) return;
+    // ASR-021 / GAP-002: $ref-depth exceed must FAIL CLOSED on this enforcement
+    // boundary. A bare `return` here reported the instance as VALID once a $ref
+    // chain (e.g. a self-referential {"$ref":"#"}) exceeded max_ref_depth, which
+    // is a fail-OPEN validation bypass. Instead, record a validation error so the
+    // report's `valid` becomes false. The keyword/message surface the
+    // RefDepthLimit code (json.zig ErrorCode.RefDepthLimit); ValidationError has
+    // no dedicated code field, so the name is carried in the message string.
+    if (depth > ctx.opts.max_ref_depth) {
+        try ctx.addError(inst_ptr, node.location, "$ref", "RefDepthLimit: $ref depth exceeded max_ref_depth");
+        return;
+    }
 
     // Boolean schema
     if (node.is_bool_schema) {
@@ -1153,17 +1200,20 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
     if (inst == .str) {
         const str = inst.str;
 
-        if (node.min_length) |min| {
+        // PERF-005: compute the UTF-8 code-point length at most once per string,
+        // only when a length keyword is present. The previous code walked the
+        // string twice when both minLength and maxLength were set.
+        if (node.min_length != null or node.max_length != null) {
             const len = countUtf8CodePoints(str);
-            if (len < min) {
-                try ctx.addError(inst_ptr, node.location, "minLength", "string too short");
+            if (node.min_length) |min| {
+                if (len < min) {
+                    try ctx.addError(inst_ptr, node.location, "minLength", "string too short");
+                }
             }
-        }
-
-        if (node.max_length) |max| {
-            const len = countUtf8CodePoints(str);
-            if (len > max) {
-                try ctx.addError(inst_ptr, node.location, "maxLength", "string too long");
+            if (node.max_length) |max| {
+                if (len > max) {
+                    try ctx.addError(inst_ptr, node.location, "maxLength", "string too long");
+                }
             }
         }
 
@@ -1720,4 +1770,303 @@ test "custom format validator" {
         }
         try std.testing.expect(!result.ok);
     }
+}
+
+/// Free the heap-allocated strings inside a ValidationReport's errors slice and
+/// the slice itself. Mirrors the cleanup boilerplate used by the tests above.
+fn freeReport(allocator: std.mem.Allocator, result: ValidationReport) void {
+    for (result.errors) |e| {
+        allocator.free(e.instance_ptr);
+        allocator.free(e.schema_ptr);
+        allocator.free(e.keyword);
+        allocator.free(e.message);
+    }
+    allocator.free(result.errors);
+}
+
+// ASR-021 / GAP-002 (validation bypass): a self-referential {"$ref":"#"} schema
+// that exceeds max_ref_depth must FAIL CLOSED. Before the fix, validateNode did a
+// bare `return` on depth exceed, so the instance was reported VALID (fail-open).
+// Now a RefDepthLimit validation error is recorded and the report is INVALID.
+test "ASR-021: self-referential \\$ref depth exceed reports invalid, not valid" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"$ref\":\"#\"}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    const inst_json = "42";
+    var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+    defer inst_doc.deinit();
+
+    const result = try validate(allocator, &compiled, inst_doc.root, .{});
+    defer freeReport(allocator, result);
+
+    // Must NOT silently pass; the infinite self-reference exceeds max_ref_depth.
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(result.errors.len >= 1);
+
+    // The error must surface the RefDepthLimit code (carried in the message,
+    // since ValidationError has no dedicated code field) and the $ref keyword.
+    var saw_ref_depth = false;
+    for (result.errors) |e| {
+        if (std.mem.eql(u8, e.keyword, "$ref") and
+            std.mem.indexOf(u8, e.message, "RefDepthLimit") != null)
+        {
+            saw_ref_depth = true;
+        }
+    }
+    try std.testing.expect(saw_ref_depth);
+}
+
+// ASR-021: with a small max_ref_depth the same bypass is reproduced quickly and
+// still fails closed (independent of the default depth of 64).
+test "ASR-021: \\$ref depth exceed fails closed with small max_ref_depth" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"$ref\":\"#\"}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    const inst_json = "true";
+    var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+    defer inst_doc.deinit();
+
+    const result = try validate(allocator, &compiled, inst_doc.root, .{ .max_ref_depth = 4 });
+    defer freeReport(allocator, result);
+
+    try std.testing.expect(!result.ok);
+}
+
+// ASR-021 (regression guard): a normal, shallow $ref chain that resolves within
+// the depth limit must still validate correctly -- only the EXCEEDED case changed
+// from valid->invalid. Here $ref points at a $defs subschema and the instance is
+// validated against it (valid case passes, invalid case fails on `type`, NOT on
+// RefDepthLimit).
+test "ASR-021: shallow \\$ref chain within depth limit still validates" {
+    const allocator = std.testing.allocator;
+
+    const schema_json =
+        \\{"$defs":{"str":{"type":"string"}},"$ref":"#/$defs/str"}
+    ;
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // Valid: a string satisfies the referenced subschema.
+    {
+        const inst_json = "\"hello\"";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(result.ok);
+    }
+
+    // Invalid: a number fails the referenced subschema -- on `type`, not depth.
+    {
+        const inst_json = "42";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(!result.ok);
+        for (result.errors) |e| {
+            try std.testing.expect(std.mem.indexOf(u8, e.message, "RefDepthLimit") == null);
+        }
+    }
+}
+
+// ASR-021 (regression guard): a recursive schema validating finite data that
+// terminates BELOW the depth limit must still pass. A linked-list node whose
+// `next` is either null or another node; the data nests only a few levels deep,
+// far under max_ref_depth, so no RefDepthLimit error is produced.
+test "ASR-021: finite recursive \\$ref data within depth limit validates" {
+    const allocator = std.testing.allocator;
+
+    const schema_json =
+        \\{"type":"object","properties":{"next":{"anyOf":[{"type":"null"},{"$ref":"#"}]}}}
+    ;
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // Three levels of nesting, terminating in null -- well within depth 64.
+    const inst_json =
+        \\{"next":{"next":{"next":null}}}
+    ;
+    var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+    defer inst_doc.deinit();
+
+    const result = try validate(allocator, &compiled, inst_doc.root, .{});
+    defer freeReport(allocator, result);
+    try std.testing.expect(result.ok);
+}
+
+// QUAL-015 (correctness): integer keywords expressed with an exponent (e.g.
+// minItems:1e1 == 10) must honor exp10. Before the fix parseIntKeyword read only
+// `digits`, so 1e1 parsed as 1 -- a far weaker bound. Now it parses as 10.
+test "QUAL-015: minItems as 1e1 enforces a bound of 10, not 1" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"minItems\":1e1}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // 9 items: below the true bound of 10 -> must FAIL.
+    {
+        const inst_json = "[1,2,3,4,5,6,7,8,9]";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(!result.ok);
+    }
+
+    // 10 items: exactly at the bound -> must PASS.
+    {
+        const inst_json = "[1,2,3,4,5,6,7,8,9,10]";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(result.ok);
+    }
+}
+
+// QUAL-015: maxLength as 1e1 (==10) enforced on UTF-8 code points. A 10-char
+// string passes; an 11-char string fails. Before the fix the bound was 1.
+test "QUAL-015: maxLength as 1e1 enforces a bound of 10" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"type\":\"string\",\"maxLength\":1e1}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // Exactly 10 characters -> PASS.
+    {
+        const inst_json = "\"0123456789\"";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(result.ok);
+    }
+
+    // 11 characters -> FAIL.
+    {
+        const inst_json = "\"0123456789A\"";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(!result.ok);
+    }
+}
+
+// QUAL-015: minLength as 1e1 (==10) must reject strings shorter than 10 and
+// accept those at/above the bound.
+test "QUAL-015: minLength as 1e1 enforces a bound of 10" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"type\":\"string\",\"minLength\":1e1}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // 9 characters -> FAIL.
+    {
+        const inst_json = "\"012345678\"";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(!result.ok);
+    }
+
+    // 10 characters -> PASS.
+    {
+        const inst_json = "\"0123456789\"";
+        var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+        defer inst_doc.deinit();
+
+        const result = try validate(allocator, &compiled, inst_doc.root, .{});
+        defer freeReport(allocator, result);
+        try std.testing.expect(result.ok);
+    }
+}
+
+// QUAL-015: a fractional integer keyword (e.g. minItems:1.5) is not a valid
+// non-negative integer. parseIntKeyword returns null so the keyword is left
+// unset (constraint not applied) rather than silently becoming a wrong bound.
+test "QUAL-015: fractional integer keyword is ignored (not a wrong bound)" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"minItems\":1.5}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    // The keyword is unset, so even an empty array validates (no false bound).
+    try std.testing.expect(compiled.root.min_items == null);
+
+    const inst_json = "[]";
+    var inst_doc = try json.parse(allocator, inst_json, .{}, &err);
+    defer inst_doc.deinit();
+
+    const result = try validate(allocator, &compiled, inst_doc.root, .{});
+    defer freeReport(allocator, result);
+    try std.testing.expect(result.ok);
+}
+
+// QUAL-015: a plain (no-exponent) integer keyword still parses exactly as before.
+// Guards against regressing the common path.
+test "QUAL-015: plain integer keyword unchanged" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"minItems\":3,\"maxItems\":5}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    try std.testing.expectEqual(@as(?u64, 3), compiled.root.min_items);
+    try std.testing.expectEqual(@as(?u64, 5), compiled.root.max_items);
 }
