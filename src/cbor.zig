@@ -132,6 +132,12 @@ pub const CborError = error{
     /// items than there are bytes left). Guards against unbounded
     /// pre-allocation from an attacker-controlled length prefix.
     InvalidLength,
+    /// A chunk of an indefinite-length byte/text string was not a
+    /// definite-length string of the matching major type. Per RFC 8949
+    /// 3.2.3 the chunks MUST be definite-length strings of the same major
+    /// type; in particular a nested indefinite-length string is malformed
+    /// (NEW-001 -- also defends against unbounded recursion on such input).
+    InvalidString,
     OutOfMemory,
 };
 
@@ -442,9 +448,18 @@ pub const Decoder = struct {
     }
 
     fn decodeValue(self: *Self) CborError!json.Value {
+        // NEW-001: enforce the recursion cap here, in the single entry point for
+        // every value, and account depth on EVERY recursion -- not just for
+        // arrays/maps. Tagged values and the chunks of indefinite-length
+        // strings also re-enter decodeValue; counting only containers let those
+        // paths recurse until the native stack overflowed. The matching
+        // increments were removed from decodeArray/decodeMap so depth is counted
+        // exactly once per level and the observable container limit is unchanged.
         if (self.depth > self.options.max_depth) {
             return error.NestingTooDeep;
         }
+        self.depth += 1;
+        defer self.depth -= 1;
 
         if (self.pos >= self.data.len) {
             return error.UnexpectedEof;
@@ -572,10 +587,17 @@ pub const Decoder = struct {
                 break;
             }
 
+            // RFC 8949 3.2.3: every chunk MUST be a definite-length byte string
+            // of the same major type. Reject anything else (notably a nested
+            // indefinite-length string) up front, before recursing -- this is
+            // both spec-correctness and defense-in-depth against the NEW-001
+            // unbounded-recursion DoS.
+            try self.expectDefiniteStringChunk(.byte_string);
+
             const chunk = try self.decodeValue();
             if (chunk != .str) {
                 freeValue(self.allocator, chunk);
-                return error.InvalidMajorType;
+                return error.InvalidString;
             }
             // Decode base64 back to bytes and append
             // For simplicity, we'll just concatenate the base64 strings
@@ -584,6 +606,20 @@ pub const Decoder = struct {
         }
 
         return .{ .str = try result.toOwnedSlice(self.allocator) };
+    }
+
+    /// RFC 8949 3.2.3 guard for indefinite-length string chunks. Peeks (without
+    /// consuming) the next item's initial byte and requires it to be a
+    /// definite-length string of the expected major type. Rejects nested
+    /// indefinite-length strings (additional == 31) and any other major type.
+    fn expectDefiniteStringChunk(self: *Self, expected: MajorType) CborError!void {
+        if (self.pos >= self.data.len) return error.UnexpectedEof;
+        const initial = self.data[self.pos];
+        const major: MajorType = @enumFromInt(initial >> 5);
+        const additional: u5 = @truncate(initial);
+        if (major != expected or additional == 31) {
+            return error.InvalidString;
+        }
     }
 
     fn decodeTextString(self: *Self, additional: u5) !json.Value {
@@ -620,10 +656,14 @@ pub const Decoder = struct {
                 break;
             }
 
+            // RFC 8949 3.2.3: every chunk MUST be a definite-length text string.
+            // See decodeIndefiniteByteString for the rationale (NEW-001).
+            try self.expectDefiniteStringChunk(.text_string);
+
             const chunk = try self.decodeValue();
             if (chunk != .str) {
                 freeValue(self.allocator, chunk);
-                return error.InvalidMajorType;
+                return error.InvalidString;
             }
             try result.appendSlice(self.allocator, chunk.str);
             self.allocator.free(chunk.str);
@@ -633,9 +673,9 @@ pub const Decoder = struct {
     }
 
     fn decodeArray(self: *Self, additional: u5) !json.Value {
-        self.depth += 1;
-        defer self.depth -= 1;
-
+        // NEW-001: depth is now accounted in decodeValue (the single recursion
+        // entry point), so this no longer increments self.depth -- doing so here
+        // would double-count and halve the effective limit.
         const length = try self.readArgument(additional);
 
         if (length == 0xFFFFFFFFFFFFFFFF) {
@@ -700,9 +740,7 @@ pub const Decoder = struct {
     }
 
     fn decodeMap(self: *Self, additional: u5) !json.Value {
-        self.depth += 1;
-        defer self.depth -= 1;
-
+        // NEW-001: depth is accounted in decodeValue now; see decodeArray.
         const length = try self.readArgument(additional);
 
         if (length == 0xFFFFFFFFFFFFFFFF) {
@@ -1301,6 +1339,13 @@ pub const StreamingDecoder = struct {
     }
 
     fn decodeValue(self: *Self) CborError!json.Value {
+        // NEW-001: the recursion cap is enforced here, the single entry point
+        // for every value. Container nesting is accounted iteratively (see
+        // decodeArray/decodeMap, which persist a depth increment that
+        // continueContainer pops on completion). The one path that recurses on
+        // the NATIVE stack is decodeTagged -> decodeValue; that recursion is now
+        // counted there (see decodeTagged), so a deep tag chain hits this cap
+        // and returns error.NestingTooDeep instead of overflowing the stack.
         if (self.depth > self.options.max_depth) {
             return error.NestingTooDeep;
         }
@@ -1430,7 +1475,8 @@ pub const StreamingDecoder = struct {
             return .{ .arr = &[_]json.Value{} };
         }
 
-        // Push array container onto stack
+        // Push array container onto stack. The depth increment persists until
+        // continueContainer pops this entry when the container completes.
         self.depth += 1;
         try self.value_stack.append(self.allocator, .{
             .container_type = .array,
@@ -1477,6 +1523,15 @@ pub const StreamingDecoder = struct {
 
     fn decodeTagged(self: *Self, additional: u5) !json.Value {
         _ = try self.readArgument(additional); // Skip tag
+        // NEW-001: a tagged value recurses into decodeValue on the native stack
+        // (it does not push onto value_stack the way containers do). Count this
+        // recursion so a deep tag chain (e.g. 0xc0 repeated) trips the depth cap
+        // in decodeValue and returns error.NestingTooDeep instead of overflowing
+        // the stack. The increment brackets exactly the recursive call: if the
+        // wrapped value is itself a container, that container's own increment
+        // persists on value_stack and is popped later by continueContainer.
+        self.depth += 1;
+        defer self.depth -= 1;
         return self.decodeValue();
     }
 
@@ -2151,4 +2206,205 @@ test "QUAL-017: decoders agree on simple-value 24 (null/undefined)" {
 
     // 0xf8 0x17 = simple value 23 (undefined -> null).
     try expectDecodersEquivalent(&[_]u8{ 0xf8, 0x17 });
+}
+
+// NEW-001: Stack-overflow DoS on untrusted input. The depth cap is enforced in
+// decodeValue, but the increment used to live only in decodeArray/decodeMap, so
+// recursive paths that re-enter decodeValue without going through a container --
+// tagged values (major type 6) and the chunks of indefinite-length byte/text
+// strings -- bypassed the cap and recursed until the native stack overflowed
+// (an uncatchable SIGABRT/SIGSEGV in Debug, ReleaseSafe and ReleaseFast).
+//
+// Fix: in the non-streaming Decoder the cap check + increment now live in
+// decodeValue itself, so every recursion is counted exactly once. In the
+// iterative StreamingDecoder the cap stays in decodeValue and the one
+// native-stack recursion (decodeTagged) now counts depth. Additionally, per
+// RFC 8949 3.2.3, indefinite-length string chunks that are not definite-length
+// strings of the matching major type are rejected (error.InvalidString). These
+// tests assert the abusive payloads now return a recoverable error rather than
+// aborting the process, and that the observable container depth limit is
+// unchanged.
+
+test "NEW-001: nested array depth limit is unchanged (control)" {
+    const allocator = std.testing.allocator;
+
+    // A chain of N single-element definite arrays (0x81) wrapping a 0x00 value.
+    // With max_depth = M the innermost value's decodeValue is entered at depth N,
+    // so it succeeds for N <= M and fails (NestingTooDeep) for N == M + 1. This
+    // boundary must hold identically before and after moving the depth accounting.
+    const max_depth: u16 = 4;
+
+    // Exactly max_depth nested arrays -> decodes fine.
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.appendNTimes(allocator, 0x81, max_depth);
+        try buf.append(allocator, 0x00);
+
+        const value = try decode(allocator, buf.items, .{ .max_depth = max_depth });
+        defer free(allocator, value);
+        try std.testing.expect(value == .arr);
+    }
+
+    // One level deeper -> NestingTooDeep, no crash.
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.appendNTimes(allocator, 0x81, max_depth + 1);
+        try buf.append(allocator, 0x00);
+
+        try std.testing.expectError(
+            error.NestingTooDeep,
+            decode(allocator, buf.items, .{ .max_depth = max_depth }),
+        );
+    }
+
+    // Indefinite-array depth is still counted too (the original working control).
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.appendNTimes(allocator, 0x9f, max_depth + 2); // open N indefinite arrays
+        try buf.appendNTimes(allocator, 0xff, max_depth + 2); // close them
+        try std.testing.expectError(
+            error.NestingTooDeep,
+            decode(allocator, buf.items, .{ .max_depth = max_depth, .allow_indefinite = true }),
+        );
+    }
+}
+
+test "NEW-001: deep tag chain returns NestingTooDeep, not a crash" {
+    const allocator = std.testing.allocator;
+
+    const max_depth: u16 = 8;
+
+    // A chain of (max_depth + 2) tag(0) bytes (0xc0) wrapping a small value.
+    // Before the fix, decodeTagged re-entered decodeValue without counting
+    // depth, so this recursed until the stack overflowed. Now each tag counts.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendNTimes(allocator, 0xc0, max_depth + 2);
+    try buf.append(allocator, 0x00);
+
+    try std.testing.expectError(
+        error.NestingTooDeep,
+        decode(allocator, buf.items, .{ .max_depth = max_depth }),
+    );
+}
+
+test "NEW-001: deep streaming tag chain returns NestingTooDeep, not a crash" {
+    const allocator = std.testing.allocator;
+
+    const max_depth: u16 = 8;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendNTimes(allocator, 0xc0, max_depth + 2);
+    try buf.append(allocator, 0x00);
+
+    var decoder = StreamingDecoder.init(allocator, .{ .max_depth = max_depth });
+    defer decoder.deinit();
+    try decoder.addData(buf.items);
+
+    const result = decoder.decodeNext();
+    try std.testing.expect(result == .err);
+    try std.testing.expectEqual(error.NestingTooDeep, result.err);
+}
+
+test "NEW-001: nested indefinite byte string is rejected, not a crash" {
+    const allocator = std.testing.allocator;
+
+    // RFC 8949 3.2.3: the chunks of an indefinite-length string must themselves
+    // be definite-length strings of the same major type. A chunk that is itself
+    // an indefinite-length byte string (0x5f) is malformed and -- before the fix
+    // -- recursed without counting depth. Both the RFC check and the depth cap
+    // now stop it.
+    {
+        // Outer indefinite byte string, then a nested indefinite byte string.
+        const data = [_]u8{ 0x5f, 0x5f, 0xff, 0xff };
+        try std.testing.expectError(
+            error.InvalidString,
+            decode(allocator, &data, .{ .allow_indefinite = true }),
+        );
+    }
+
+    // A long chain of nested indefinite byte strings (the DoS payload shape) is
+    // also rejected promptly rather than overflowing the stack.
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.appendNTimes(allocator, 0x5f, 16);
+        try std.testing.expectError(
+            error.InvalidString,
+            decode(allocator, buf.items, .{ .max_depth = 8, .allow_indefinite = true }),
+        );
+    }
+}
+
+test "NEW-001: nested indefinite text string is rejected, not a crash" {
+    const allocator = std.testing.allocator;
+
+    {
+        // Outer indefinite text string, then a nested indefinite text string.
+        const data = [_]u8{ 0x7f, 0x7f, 0xff, 0xff };
+        try std.testing.expectError(
+            error.InvalidString,
+            decode(allocator, &data, .{ .allow_indefinite = true }),
+        );
+    }
+
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.appendNTimes(allocator, 0x7f, 16);
+        try std.testing.expectError(
+            error.InvalidString,
+            decode(allocator, buf.items, .{ .max_depth = 8, .allow_indefinite = true }),
+        );
+    }
+}
+
+test "NEW-001: valid tagged values and indefinite strings still decode" {
+    const allocator = std.testing.allocator;
+
+    // Tag 0 (standard date/time) wrapping a text string "2013-03-21T20:04:00Z".
+    {
+        const data = [_]u8{
+            0xc0, 0x74, '2', '0', '1', '3', '-', '0', '3', '-',
+            '2',  '1',  'T', '2', '0', ':', '0', '4', ':', '0',
+            '0',  'Z',
+        };
+        const value = try decode(allocator, &data, .{});
+        defer free(allocator, value);
+        try std.testing.expect(value == .str);
+        try std.testing.expectEqualStrings("2013-03-21T20:04:00Z", value.str);
+    }
+
+    // Tag 2 (positive bignum) wrapping a 2-byte byte string.
+    {
+        const data = [_]u8{ 0xc2, 0x42, 0x01, 0x00 };
+        const value = try decode(allocator, &data, .{});
+        defer free(allocator, value);
+        try std.testing.expect(value == .str); // byte string -> base64
+    }
+
+    // Valid indefinite-length text string with two definite-length chunks:
+    // 0x7f, "Hello"(0x65 ...), "World"(0x65 ...), 0xff -> "HelloWorld".
+    {
+        const data = [_]u8{
+            0x7f, 0x65, 'H', 'e', 'l', 'l', 'o',
+            0x65, 'W',  'o', 'r', 'l', 'd', 0xff,
+        };
+        const value = try decode(allocator, &data, .{ .allow_indefinite = true });
+        defer free(allocator, value);
+        try std.testing.expect(value == .str);
+        try std.testing.expectEqualStrings("HelloWorld", value.str);
+    }
+
+    // Valid indefinite-length byte string with two definite-length chunks.
+    {
+        const data = [_]u8{ 0x5f, 0x42, 0x01, 0x02, 0x43, 0x03, 0x04, 0x05, 0xff };
+        const value = try decode(allocator, &data, .{ .allow_indefinite = true });
+        defer free(allocator, value);
+        try std.testing.expect(value == .str); // base64-joined chunks
+    }
 }
