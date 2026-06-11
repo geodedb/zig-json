@@ -44,8 +44,9 @@ pub const Token = struct {
     line: u32,
     /// Column number (1-indexed)
     col: u32,
-    /// Byte offset in input
-    offset: u32,
+    /// Byte offset in input. Widened to usize so inputs at or beyond 4 GiB do
+    /// not truncate or panic on the offset cast.
+    offset: usize,
 };
 
 /// Tokenizer error codes
@@ -57,6 +58,10 @@ pub const TokenizerError = error{
     InvalidEscape,
     InvalidSurrogate,
     InvalidNumber,
+    /// Nesting depth exceeded options.max_depth
+    DepthLimit,
+    /// String length exceeded options.max_string_len
+    StringTooLong,
     OutOfMemory,
 };
 
@@ -117,7 +122,7 @@ pub const Tokenizer = struct {
                 .bytes = "",
                 .line = self.line,
                 .col = self.col,
-                .offset = @intCast(self.pos),
+                .offset = self.pos,
             };
         }
 
@@ -129,27 +134,27 @@ pub const Tokenizer = struct {
         return switch (c) {
             '{' => {
                 self.advance();
-                return Token{ .type = .object_start, .bytes = "{", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                return Token{ .type = .object_start, .bytes = "{", .line = start_line, .col = start_col, .offset = start_pos };
             },
             '}' => {
                 self.advance();
-                return Token{ .type = .object_end, .bytes = "}", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                return Token{ .type = .object_end, .bytes = "}", .line = start_line, .col = start_col, .offset = start_pos };
             },
             '[' => {
                 self.advance();
-                return Token{ .type = .array_start, .bytes = "[", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                return Token{ .type = .array_start, .bytes = "[", .line = start_line, .col = start_col, .offset = start_pos };
             },
             ']' => {
                 self.advance();
-                return Token{ .type = .array_end, .bytes = "]", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                return Token{ .type = .array_end, .bytes = "]", .line = start_line, .col = start_col, .offset = start_pos };
             },
             ':' => {
                 self.advance();
-                return Token{ .type = .colon, .bytes = ":", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                return Token{ .type = .colon, .bytes = ":", .line = start_line, .col = start_col, .offset = start_pos };
             },
             ',' => {
                 self.advance();
-                return Token{ .type = .comma, .bytes = ",", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                return Token{ .type = .comma, .bytes = ",", .line = start_line, .col = start_col, .offset = start_pos };
             },
             '"' => self.scanString(start_line, start_col, start_pos),
             't' => self.scanTrue(start_line, start_col, start_pos),
@@ -175,57 +180,30 @@ pub const Tokenizer = struct {
         const token = try self.next();
 
         switch (token.type) {
-            .object_start => {
-                var depth: u16 = 1;
+            .object_start, .array_start => {
+                // Track total nesting depth with a single iterative counter
+                // (no recursion) so deeply nested input cannot overflow the
+                // counter or the call stack. Enforce opts.max_depth.
+                var depth: usize = 1;
+                if (depth > self.opts.max_depth) return error.DepthLimit;
                 while (depth > 0) {
                     const t = try self.next();
                     switch (t.type) {
-                        .object_start => depth += 1,
-                        .object_end => depth -= 1,
-                        .array_start => {
-                            // Need to track array depth too
-                            try self.skipArrayContents();
+                        .object_start, .array_start => {
+                            depth += 1;
+                            if (depth > self.opts.max_depth) return error.DepthLimit;
                         },
+                        .object_end, .array_end => depth -= 1,
                         .eof => return error.UnexpectedEof,
                         else => {},
                     }
                 }
-            },
-            .array_start => {
-                try self.skipArrayContents();
             },
             .string, .number, .true_literal, .false_literal, .null_literal => {
                 // Primitive values are already consumed
             },
             .eof => return error.UnexpectedEof,
             else => return error.UnexpectedToken,
-        }
-    }
-
-    fn skipArrayContents(self: *Tokenizer) TokenizerError!void {
-        var depth: u16 = 1;
-        while (depth > 0) {
-            const t = try self.next();
-            switch (t.type) {
-                .array_start => depth += 1,
-                .array_end => depth -= 1,
-                .object_start => {
-                    // Need to track object depth too
-                    var obj_depth: u16 = 1;
-                    while (obj_depth > 0) {
-                        const ot = try self.next();
-                        switch (ot.type) {
-                            .object_start => obj_depth += 1,
-                            .object_end => obj_depth -= 1,
-                            .array_start => try self.skipArrayContents(),
-                            .eof => return error.UnexpectedEof,
-                            else => {},
-                        }
-                    }
-                },
-                .eof => return error.UnexpectedEof,
-                else => {},
-            }
         }
     }
 
@@ -286,8 +264,14 @@ pub const Tokenizer = struct {
                     .bytes = self.string_buffer.items,
                     .line = start_line,
                     .col = start_col,
-                    .offset = @intCast(start_pos),
+                    .offset = start_pos,
                 };
+            }
+
+            // Bound the decoded string length to prevent unbounded memory use
+            // from a hostile, very long string.
+            if (self.string_buffer.items.len > self.opts.max_string_len) {
+                return error.StringTooLong;
             }
 
             if (c == '\\') {
@@ -322,7 +306,9 @@ pub const Tokenizer = struct {
                 if (self.pos + seq_len > self.input.len) return error.InvalidUtf8;
 
                 const seq = self.input[self.pos..][0..seq_len];
-                _ = unicode.decodeUtf8(seq) catch return error.InvalidUtf8;
+                // Strictly validate the full sequence: reject malformed bytes,
+                // overlong encodings, and UTF-16 surrogate code points.
+                if (!unicode.isValidUtf8Seq(seq)) return error.InvalidUtf8;
 
                 self.string_buffer.appendSlice(self.allocator, seq) catch return error.OutOfMemory;
                 self.pos += seq_len;
@@ -397,7 +383,7 @@ pub const Tokenizer = struct {
             .bytes = "true",
             .line = start_line,
             .col = start_col,
-            .offset = @intCast(start_pos),
+            .offset = start_pos,
         };
     }
 
@@ -413,7 +399,7 @@ pub const Tokenizer = struct {
             .bytes = "false",
             .line = start_line,
             .col = start_col,
-            .offset = @intCast(start_pos),
+            .offset = start_pos,
         };
     }
 
@@ -429,7 +415,7 @@ pub const Tokenizer = struct {
             .bytes = "null",
             .line = start_line,
             .col = start_col,
-            .offset = @intCast(start_pos),
+            .offset = start_pos,
         };
     }
 
@@ -486,7 +472,7 @@ pub const Tokenizer = struct {
             .bytes = self.input[num_start..self.pos],
             .line = start_line,
             .col = start_col,
-            .offset = @intCast(start_pos),
+            .offset = start_pos,
         };
     }
 };
@@ -499,6 +485,12 @@ pub const Tokenizer = struct {
 /// More memory-efficient for extracting specific values from large documents
 /// Caller should call freeValue() when done with the returned value
 pub fn readValue(tokenizer: *Tokenizer) TokenizerError!json.Value {
+    return readValueDepth(tokenizer, 0);
+}
+
+/// Internal: read a value while tracking the current nesting depth so that
+/// recursion through readArray/readObject is bounded by opts.max_depth.
+fn readValueDepth(tokenizer: *Tokenizer, depth: usize) TokenizerError!json.Value {
     const token = try tokenizer.next();
 
     return switch (token.type) {
@@ -507,8 +499,8 @@ pub fn readValue(tokenizer: *Tokenizer) TokenizerError!json.Value {
         .false_literal => .{ .bool = false },
         .string => .{ .str = tokenizer.allocator.dupe(u8, token.bytes) catch return error.OutOfMemory },
         .number => .{ .num = parseNumberToken(token.bytes) },
-        .array_start => try readArray(tokenizer),
-        .object_start => try readObject(tokenizer),
+        .array_start => try readArray(tokenizer, depth + 1),
+        .object_start => try readObject(tokenizer, depth + 1),
         .eof => error.UnexpectedEof,
         else => error.UnexpectedToken,
     };
@@ -599,9 +591,16 @@ fn parseNumberToken(lexeme: []const u8) json.Number {
     };
 }
 
-fn readArray(tokenizer: *Tokenizer) TokenizerError!json.Value {
+fn readArray(tokenizer: *Tokenizer, depth: usize) TokenizerError!json.Value {
+    if (depth > tokenizer.opts.max_depth) return error.DepthLimit;
+
     var items: std.ArrayList(json.Value) = .empty;
-    defer items.deinit(tokenizer.allocator);
+    // Free both the container spine AND any elements already parsed if we
+    // return early on a malformed input, so a mid-parse error cannot leak.
+    errdefer {
+        for (items.items) |item| freeValue(tokenizer.allocator, item);
+        items.deinit(tokenizer.allocator);
+    }
 
     while (true) {
         const peek_token = try tokenizer.peek();
@@ -610,8 +609,11 @@ fn readArray(tokenizer: *Tokenizer) TokenizerError!json.Value {
             break;
         }
 
-        const item = try readValue(tokenizer);
-        items.append(tokenizer.allocator, item) catch return error.OutOfMemory;
+        const item = try readValueDepth(tokenizer, depth);
+        items.append(tokenizer.allocator, item) catch {
+            freeValue(tokenizer.allocator, item);
+            return error.OutOfMemory;
+        };
 
         const next_token = try tokenizer.peek();
         if (next_token.type == .comma) {
@@ -625,9 +627,19 @@ fn readArray(tokenizer: *Tokenizer) TokenizerError!json.Value {
     return .{ .arr = owned };
 }
 
-fn readObject(tokenizer: *Tokenizer) TokenizerError!json.Value {
+fn readObject(tokenizer: *Tokenizer, depth: usize) TokenizerError!json.Value {
+    if (depth > tokenizer.opts.max_depth) return error.DepthLimit;
+
     var members: std.ArrayList(json.Member) = .empty;
-    defer members.deinit(tokenizer.allocator);
+    // Free both the container spine AND any members already parsed (key + value)
+    // if we return early on a malformed input.
+    errdefer {
+        for (members.items) |m| {
+            tokenizer.allocator.free(m.k);
+            freeValue(tokenizer.allocator, m.v);
+        }
+        members.deinit(tokenizer.allocator);
+    }
 
     while (true) {
         const peek_token = try tokenizer.peek();
@@ -640,17 +652,34 @@ fn readObject(tokenizer: *Tokenizer) TokenizerError!json.Value {
         const key_token = try tokenizer.next();
         if (key_token.type != .string) return error.UnexpectedToken;
 
-        // Dupe the key since tokenizer buffer will be reused
+        // Dupe the key since tokenizer buffer will be reused. The duped key
+        // must be freed on any error path until ownership transfers to
+        // members.append; we free it explicitly on each such path rather than
+        // with an iteration-scoped errdefer (which would double-free once the
+        // member is owned by the function-level errdefer below).
         const key = tokenizer.allocator.dupe(u8, key_token.bytes) catch return error.OutOfMemory;
 
         // Read colon
-        const colon_token = try tokenizer.next();
-        if (colon_token.type != .colon) return error.UnexpectedToken;
+        const colon_token = tokenizer.next() catch |err| {
+            tokenizer.allocator.free(key);
+            return err;
+        };
+        if (colon_token.type != .colon) {
+            tokenizer.allocator.free(key);
+            return error.UnexpectedToken;
+        }
 
         // Read value
-        const value = try readValue(tokenizer);
-
-        members.append(tokenizer.allocator, .{ .k = key, .v = value }) catch return error.OutOfMemory;
+        const value = readValueDepth(tokenizer, depth) catch |err| {
+            tokenizer.allocator.free(key);
+            return err;
+        };
+        // key and value ownership transfers to members on success.
+        members.append(tokenizer.allocator, .{ .k = key, .v = value }) catch {
+            tokenizer.allocator.free(key);
+            freeValue(tokenizer.allocator, value);
+            return error.OutOfMemory;
+        };
 
         const next_token = try tokenizer.peek();
         if (next_token.type == .comma) {
@@ -892,6 +921,153 @@ test "readValue object" {
     try std.testing.expectEqualStrings("Alice", value.obj[0].v.str);
 }
 
+// ----------------------------------------------------------------------------
+// Security / DoS regression tests (slice path)
+// ----------------------------------------------------------------------------
+
+test "readValue rejects deeply nested arrays at max_depth (no crash)" {
+    const allocator = std.testing.allocator;
+    // Build "[[[[...]" deeper than max_depth, never closed.
+    const depth = 2000;
+    const input = try allocator.alloc(u8, depth);
+    defer allocator.free(input);
+    @memset(input, '[');
+
+    var tokenizer = Tokenizer.init(allocator, input, .{ .max_depth = 64 });
+    defer tokenizer.deinit();
+
+    // Must return the depth error rather than overflowing the stack.
+    try std.testing.expectError(error.DepthLimit, readValue(&tokenizer));
+}
+
+test "readValue rejects deeply nested objects at max_depth (no crash)" {
+    const allocator = std.testing.allocator;
+    // Build {"a":{"a":{"a":... deeper than max_depth.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const depth = 1000;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        try buf.appendSlice(allocator, "{\"a\":");
+    }
+    try buf.append(allocator, '1');
+
+    var tokenizer = Tokenizer.init(allocator, buf.items, .{ .max_depth = 32 });
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.DepthLimit, readValue(&tokenizer));
+}
+
+test "readValue accepts nesting within max_depth" {
+    const allocator = std.testing.allocator;
+    // 4 levels of nesting, max_depth 8 -> must parse fine.
+    var tokenizer = Tokenizer.init(allocator, "[[[[1]]]]", .{ .max_depth = 8 });
+    defer tokenizer.deinit();
+
+    const value = try readValue(&tokenizer);
+    defer freeValue(allocator, value);
+    try std.testing.expect(value == .arr);
+}
+
+test "skipValue rejects deeply nested input at max_depth (no crash)" {
+    const allocator = std.testing.allocator;
+    const depth = 2000;
+    const input = try allocator.alloc(u8, depth);
+    defer allocator.free(input);
+    @memset(input, '[');
+
+    var tokenizer = Tokenizer.init(allocator, input, .{ .max_depth = 64 });
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.DepthLimit, tokenizer.skipValue());
+}
+
+test "scanString rejects string longer than max_string_len" {
+    const allocator = std.testing.allocator;
+    // A 100-byte string with max_string_len = 8 -> StringTooLong.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.append(allocator, '"');
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        try buf.append(allocator, 'x');
+    }
+    try buf.append(allocator, '"');
+
+    var tokenizer = Tokenizer.init(allocator, buf.items, .{ .max_string_len = 8 });
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.StringTooLong, tokenizer.next());
+}
+
+test "scanString accepts string within max_string_len" {
+    const allocator = std.testing.allocator;
+    var tokenizer = Tokenizer.init(allocator, "\"short\"", .{ .max_string_len = 8 });
+    defer tokenizer.deinit();
+
+    const t = try tokenizer.next();
+    try std.testing.expectEqual(TokenType.string, t.type);
+    try std.testing.expectEqualStrings("short", t.bytes);
+}
+
+test "scanString rejects surrogate and overlong UTF-8 (slice path)" {
+    const allocator = std.testing.allocator;
+
+    // UTF-16 surrogate U+D800 encoded as raw bytes ED A0 80.
+    {
+        var tokenizer = Tokenizer.init(allocator, "\"\xED\xA0\x80\"", .{});
+        defer tokenizer.deinit();
+        try std.testing.expectError(error.InvalidUtf8, tokenizer.next());
+    }
+
+    // Overlong encoding of NUL via 4 bytes F0 80 80 80.
+    {
+        var tokenizer = Tokenizer.init(allocator, "\"\xF0\x80\x80\x80\"", .{});
+        defer tokenizer.deinit();
+        try std.testing.expectError(error.InvalidUtf8, tokenizer.next());
+    }
+}
+
+test "readValue array malformed mid-parse does not leak" {
+    // std.testing.allocator detects leaks. Use string elements (which dupe and
+    // therefore allocate) so a leak of already-parsed elements would be caught;
+    // the trailing @ triggers a mid-parse error after "aa" and "bb" are built.
+    const allocator = std.testing.allocator;
+    var tokenizer = Tokenizer.init(allocator, "[\"aa\", \"bb\", @]", .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValue(&tokenizer));
+}
+
+test "readValue nested array malformed mid-parse does not leak" {
+    // Already-parsed nested array [1,2] allocates a spine; the trailing @ errors.
+    const allocator = std.testing.allocator;
+    var tokenizer = Tokenizer.init(allocator, "[[1, 2], @]", .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValue(&tokenizer));
+}
+
+test "readValue object malformed mid-parse does not leak" {
+    // Errors after building member "a":"x" (duped key + duped value) and after
+    // duping the second key "b" (missing colon). All must be freed.
+    const allocator = std.testing.allocator;
+    var tokenizer = Tokenizer.init(allocator, "{\"a\":\"x\",\"b\" 2}", .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValue(&tokenizer));
+}
+
+test "readValue object malformed value does not leak duped key" {
+    // Errors while reading the value for key "b" -- the duped key "b" and the
+    // already-built member "a":"x" must all be freed.
+    const allocator = std.testing.allocator;
+    var tokenizer = Tokenizer.init(allocator, "{\"a\":\"x\",\"b\":@}", .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValue(&tokenizer));
+}
+
 // ============================================================================
 // Reader-based Streaming Tokenizer
 // ============================================================================
@@ -915,6 +1091,10 @@ pub const ReaderTokenizerError = error{
     InvalidEscape,
     InvalidSurrogate,
     InvalidNumber,
+    /// Nesting depth exceeded options.max_depth
+    DepthLimit,
+    /// String length exceeded options.max_string_len
+    StringTooLong,
     OutOfMemory,
     IoError,
     BufferOverflow,
@@ -997,7 +1177,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                     .bytes = "",
                     .line = self.line,
                     .col = self.col,
-                    .offset = @intCast(self.total_read),
+                    .offset = self.total_read,
                 };
             };
 
@@ -1008,27 +1188,27 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
             return switch (c) {
                 '{' => {
                     self.advance();
-                    return Token{ .type = .object_start, .bytes = "{", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                    return Token{ .type = .object_start, .bytes = "{", .line = start_line, .col = start_col, .offset = start_pos };
                 },
                 '}' => {
                     self.advance();
-                    return Token{ .type = .object_end, .bytes = "}", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                    return Token{ .type = .object_end, .bytes = "}", .line = start_line, .col = start_col, .offset = start_pos };
                 },
                 '[' => {
                     self.advance();
-                    return Token{ .type = .array_start, .bytes = "[", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                    return Token{ .type = .array_start, .bytes = "[", .line = start_line, .col = start_col, .offset = start_pos };
                 },
                 ']' => {
                     self.advance();
-                    return Token{ .type = .array_end, .bytes = "]", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                    return Token{ .type = .array_end, .bytes = "]", .line = start_line, .col = start_col, .offset = start_pos };
                 },
                 ':' => {
                     self.advance();
-                    return Token{ .type = .colon, .bytes = ":", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                    return Token{ .type = .colon, .bytes = ":", .line = start_line, .col = start_col, .offset = start_pos };
                 },
                 ',' => {
                     self.advance();
-                    return Token{ .type = .comma, .bytes = ",", .line = start_line, .col = start_col, .offset = @intCast(start_pos) };
+                    return Token{ .type = .comma, .bytes = ",", .line = start_line, .col = start_col, .offset = start_pos };
                 },
                 '"' => self.scanString(start_line, start_col, start_pos),
                 't' => self.scanTrue(start_line, start_col, start_pos),
@@ -1053,49 +1233,28 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
             const token = try self.next();
 
             switch (token.type) {
-                .object_start => {
-                    var depth: u16 = 1;
+                .object_start, .array_start => {
+                    // Track total nesting depth with a single iterative counter
+                    // (no recursion) so deeply nested input cannot overflow the
+                    // counter or the call stack. Enforce opts.max_depth.
+                    var depth: usize = 1;
+                    if (depth > self.opts.max_depth) return error.DepthLimit;
                     while (depth > 0) {
                         const t = try self.next();
                         switch (t.type) {
-                            .object_start => depth += 1,
-                            .object_end => depth -= 1,
-                            .array_start => try self.skipArrayContents(),
+                            .object_start, .array_start => {
+                                depth += 1;
+                                if (depth > self.opts.max_depth) return error.DepthLimit;
+                            },
+                            .object_end, .array_end => depth -= 1,
                             .eof => return error.UnexpectedEof,
                             else => {},
                         }
                     }
                 },
-                .array_start => try self.skipArrayContents(),
                 .string, .number, .true_literal, .false_literal, .null_literal => {},
                 .eof => return error.UnexpectedEof,
                 else => return error.UnexpectedToken,
-            }
-        }
-
-        fn skipArrayContents(self: *Self) ReaderTokenizerError!void {
-            var depth: u16 = 1;
-            while (depth > 0) {
-                const t = try self.next();
-                switch (t.type) {
-                    .array_start => depth += 1,
-                    .array_end => depth -= 1,
-                    .object_start => {
-                        var obj_depth: u16 = 1;
-                        while (obj_depth > 0) {
-                            const ot = try self.next();
-                            switch (ot.type) {
-                                .object_start => obj_depth += 1,
-                                .object_end => obj_depth -= 1,
-                                .array_start => try self.skipArrayContents(),
-                                .eof => return error.UnexpectedEof,
-                                else => {},
-                            }
-                        }
-                    },
-                    .eof => return error.UnexpectedEof,
-                    else => {},
-                }
             }
         }
 
@@ -1169,8 +1328,14 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                         .bytes = self.string_buffer.items,
                         .line = start_line,
                         .col = start_col,
-                        .offset = @intCast(start_pos),
+                        .offset = start_pos,
                     };
+                }
+
+                // Bound the decoded string length to prevent unbounded memory
+                // use from a hostile, very long string.
+                if (self.string_buffer.items.len > self.opts.max_string_len) {
+                    return error.StringTooLong;
                 }
 
                 if (c == '\\') {
@@ -1193,14 +1358,21 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                 } else if (c < 0x20) {
                     return error.InvalidString;
                 } else if (c >= 0x80) {
-                    // UTF-8 multi-byte - first byte already consumed
-                    self.string_buffer.append(self.allocator, c) catch return error.OutOfMemory;
+                    // UTF-8 multi-byte - first byte already consumed. Assemble
+                    // the full sequence and strictly validate it (rejecting
+                    // malformed bytes, overlong encodings, and UTF-16 surrogate
+                    // code points) before appending, matching the slice path so
+                    // the streaming parser cannot be used to smuggle invalid
+                    // UTF-8 past the slice parser's checks.
                     const seq_len = unicode.utf8SeqLen(c) catch return error.InvalidUtf8;
+                    var seq: [4]u8 = undefined;
+                    seq[0] = c;
                     var i: usize = 1;
                     while (i < seq_len) : (i += 1) {
-                        const b = self.readByte() catch return error.UnexpectedEof;
-                        self.string_buffer.append(self.allocator, b) catch return error.OutOfMemory;
+                        seq[i] = self.readByte() catch return error.UnexpectedEof;
                     }
+                    if (!unicode.isValidUtf8Seq(seq[0..seq_len])) return error.InvalidUtf8;
+                    self.string_buffer.appendSlice(self.allocator, seq[0..seq_len]) catch return error.OutOfMemory;
                 } else {
                     self.string_buffer.append(self.allocator, c) catch return error.OutOfMemory;
                 }
@@ -1259,7 +1431,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                 .bytes = "true",
                 .line = start_line,
                 .col = start_col,
-                .offset = @intCast(start_pos),
+                .offset = start_pos,
             };
         }
 
@@ -1275,7 +1447,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                 .bytes = "false",
                 .line = start_line,
                 .col = start_col,
-                .offset = @intCast(start_pos),
+                .offset = start_pos,
             };
         }
 
@@ -1291,7 +1463,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                 .bytes = "null",
                 .line = start_line,
                 .col = start_col,
-                .offset = @intCast(start_pos),
+                .offset = start_pos,
             };
         }
 
@@ -1330,7 +1502,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                     .bytes = self.number_buffer.items,
                     .line = start_line,
                     .col = start_col,
-                    .offset = @intCast(start_pos),
+                    .offset = start_pos,
                 };
             };
 
@@ -1353,7 +1525,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                     .bytes = self.number_buffer.items,
                     .line = start_line,
                     .col = start_col,
-                    .offset = @intCast(start_pos),
+                    .offset = start_pos,
                 };
             };
 
@@ -1379,7 +1551,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                 .bytes = self.number_buffer.items,
                 .line = start_line,
                 .col = start_col,
-                .offset = @intCast(start_pos),
+                .offset = start_pos,
             };
         }
     };
@@ -1392,6 +1564,12 @@ pub fn readerTokenizer(allocator: std.mem.Allocator, reader: anytype, opts: Read
 
 /// Read the next JSON value from a reader tokenizer
 pub fn readValueFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
+    return readValueFromReaderDepth(tokenizer, 0);
+}
+
+/// Internal: read a value while tracking nesting depth so that recursion is
+/// bounded by opts.max_depth.
+fn readValueFromReaderDepth(tokenizer: anytype, depth: usize) ReaderTokenizerError!json.Value {
     const token = try tokenizer.next();
 
     return switch (token.type) {
@@ -1400,16 +1578,22 @@ pub fn readValueFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
         .false_literal => .{ .bool = false },
         .string => .{ .str = tokenizer.allocator.dupe(u8, token.bytes) catch return error.OutOfMemory },
         .number => .{ .num = parseNumberToken(token.bytes) },
-        .array_start => try readArrayFromReader(tokenizer),
-        .object_start => try readObjectFromReader(tokenizer),
+        .array_start => try readArrayFromReader(tokenizer, depth + 1),
+        .object_start => try readObjectFromReader(tokenizer, depth + 1),
         .eof => error.UnexpectedEof,
         else => error.UnexpectedToken,
     };
 }
 
-fn readArrayFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
+fn readArrayFromReader(tokenizer: anytype, depth: usize) ReaderTokenizerError!json.Value {
+    if (depth > tokenizer.opts.max_depth) return error.DepthLimit;
+
     var items: std.ArrayList(json.Value) = .empty;
-    defer items.deinit(tokenizer.allocator);
+    // Free the spine AND any already-parsed elements on a mid-parse error.
+    errdefer {
+        for (items.items) |item| freeValue(tokenizer.allocator, item);
+        items.deinit(tokenizer.allocator);
+    }
 
     while (true) {
         const peek_token = try tokenizer.peek();
@@ -1418,8 +1602,11 @@ fn readArrayFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
             break;
         }
 
-        const item = try readValueFromReader(tokenizer);
-        items.append(tokenizer.allocator, item) catch return error.OutOfMemory;
+        const item = try readValueFromReaderDepth(tokenizer, depth);
+        items.append(tokenizer.allocator, item) catch {
+            freeValue(tokenizer.allocator, item);
+            return error.OutOfMemory;
+        };
 
         const next_token = try tokenizer.peek();
         if (next_token.type == .comma) {
@@ -1433,9 +1620,18 @@ fn readArrayFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
     return .{ .arr = owned };
 }
 
-fn readObjectFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
+fn readObjectFromReader(tokenizer: anytype, depth: usize) ReaderTokenizerError!json.Value {
+    if (depth > tokenizer.opts.max_depth) return error.DepthLimit;
+
     var members: std.ArrayList(json.Member) = .empty;
-    defer members.deinit(tokenizer.allocator);
+    // Free the spine AND any already-parsed members (key + value) on error.
+    errdefer {
+        for (members.items) |m| {
+            tokenizer.allocator.free(m.k);
+            freeValue(tokenizer.allocator, m.v);
+        }
+        members.deinit(tokenizer.allocator);
+    }
 
     while (true) {
         const peek_token = try tokenizer.peek();
@@ -1447,14 +1643,30 @@ fn readObjectFromReader(tokenizer: anytype) ReaderTokenizerError!json.Value {
         const key_token = try tokenizer.next();
         if (key_token.type != .string) return error.UnexpectedToken;
 
+        // Free the duped key explicitly on each error path until ownership
+        // transfers to members.append (avoids double-free with the
+        // function-level errdefer above).
         const key = tokenizer.allocator.dupe(u8, key_token.bytes) catch return error.OutOfMemory;
 
-        const colon_token = try tokenizer.next();
-        if (colon_token.type != .colon) return error.UnexpectedToken;
+        const colon_token = tokenizer.next() catch |err| {
+            tokenizer.allocator.free(key);
+            return err;
+        };
+        if (colon_token.type != .colon) {
+            tokenizer.allocator.free(key);
+            return error.UnexpectedToken;
+        }
 
-        const value = try readValueFromReader(tokenizer);
+        const value = readValueFromReaderDepth(tokenizer, depth) catch |err| {
+            tokenizer.allocator.free(key);
+            return err;
+        };
 
-        members.append(tokenizer.allocator, .{ .k = key, .v = value }) catch return error.OutOfMemory;
+        members.append(tokenizer.allocator, .{ .k = key, .v = value }) catch {
+            tokenizer.allocator.free(key);
+            freeValue(tokenizer.allocator, value);
+            return error.OutOfMemory;
+        };
 
         const next_token = try tokenizer.peek();
         if (next_token.type == .comma) {
@@ -1581,4 +1793,165 @@ test "ReaderTokenizer number formats" {
 
     const t5 = try tokenizer.next();
     try std.testing.expectEqualStrings("-2.5e-3", t5.bytes);
+}
+
+// ----------------------------------------------------------------------------
+// Security / DoS regression tests (reader path)
+// ----------------------------------------------------------------------------
+
+test "ReaderTokenizer readValue rejects deeply nested arrays at max_depth" {
+    const allocator = std.testing.allocator;
+    const depth = 2000;
+    const input = try allocator.alloc(u8, depth);
+    defer allocator.free(input);
+    @memset(input, '[');
+
+    var reader: std.Io.Reader = .fixed(input);
+    var tokenizer = try readerTokenizer(allocator, &reader, .{ .max_depth = 64 });
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.DepthLimit, readValueFromReader(&tokenizer));
+}
+
+test "ReaderTokenizer readValue rejects deeply nested objects at max_depth" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const depth = 1000;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        try buf.appendSlice(allocator, "{\"a\":");
+    }
+    try buf.append(allocator, '1');
+
+    var reader: std.Io.Reader = .fixed(buf.items);
+    var tokenizer = try readerTokenizer(allocator, &reader, .{ .max_depth = 32 });
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.DepthLimit, readValueFromReader(&tokenizer));
+}
+
+test "ReaderTokenizer readValue accepts nesting within max_depth" {
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("[[[[1]]]]");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{ .max_depth = 8 });
+    defer tokenizer.deinit();
+
+    const value = try readValueFromReader(&tokenizer);
+    defer freeValue(allocator, value);
+    try std.testing.expect(value == .arr);
+}
+
+test "ReaderTokenizer skipValue rejects deeply nested input at max_depth" {
+    const allocator = std.testing.allocator;
+    const depth = 2000;
+    const input = try allocator.alloc(u8, depth);
+    defer allocator.free(input);
+    @memset(input, '[');
+
+    var reader: std.Io.Reader = .fixed(input);
+    var tokenizer = try readerTokenizer(allocator, &reader, .{ .max_depth = 64 });
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.DepthLimit, tokenizer.skipValue());
+}
+
+test "ReaderTokenizer scanString rejects string longer than max_string_len" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.append(allocator, '"');
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        try buf.append(allocator, 'x');
+    }
+    try buf.append(allocator, '"');
+
+    var reader: std.Io.Reader = .fixed(buf.items);
+    var tokenizer = try readerTokenizer(allocator, &reader, .{ .max_string_len = 8 });
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.StringTooLong, tokenizer.next());
+}
+
+test "ReaderTokenizer scanString accepts string within max_string_len" {
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("\"short\"");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{ .max_string_len = 8 });
+    defer tokenizer.deinit();
+
+    const t = try tokenizer.next();
+    try std.testing.expectEqual(TokenType.string, t.type);
+    try std.testing.expectEqualStrings("short", t.bytes);
+}
+
+test "ReaderTokenizer scanString rejects surrogate and overlong UTF-8" {
+    const allocator = std.testing.allocator;
+
+    // UTF-16 surrogate U+D800 (ED A0 80) must be rejected just like the slice
+    // path, preventing UTF-8 smuggling through the streaming parser.
+    {
+        var reader: std.Io.Reader = .fixed("\"\xED\xA0\x80\"");
+        var tokenizer = try readerTokenizer(allocator, &reader, .{});
+        defer tokenizer.deinit();
+        try std.testing.expectError(error.InvalidUtf8, tokenizer.next());
+    }
+
+    // Overlong encoding (F0 80 80 80) must be rejected.
+    {
+        var reader: std.Io.Reader = .fixed("\"\xF0\x80\x80\x80\"");
+        var tokenizer = try readerTokenizer(allocator, &reader, .{});
+        defer tokenizer.deinit();
+        try std.testing.expectError(error.InvalidUtf8, tokenizer.next());
+    }
+}
+
+test "ReaderTokenizer scanString accepts valid multi-byte UTF-8" {
+    const allocator = std.testing.allocator;
+    // U+20AC EURO SIGN (E2 82 AC) and U+1F600 (F0 9F 98 80) must still parse.
+    var reader: std.Io.Reader = .fixed("\"\xE2\x82\xAC\xF0\x9F\x98\x80\"");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
+    defer tokenizer.deinit();
+
+    const t = try tokenizer.next();
+    try std.testing.expectEqual(TokenType.string, t.type);
+    try std.testing.expectEqualStrings("\xE2\x82\xAC\xF0\x9F\x98\x80", t.bytes);
+}
+
+test "ReaderTokenizer readValue array malformed mid-parse does not leak" {
+    // String elements allocate (dupe); trailing @ errors after they are built.
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("[\"aa\", \"bb\", @]");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValueFromReader(&tokenizer));
+}
+
+test "ReaderTokenizer readValue nested array malformed mid-parse does not leak" {
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("[[1, 2], @]");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValueFromReader(&tokenizer));
+}
+
+test "ReaderTokenizer readValue object malformed mid-parse does not leak" {
+    // Member "a":"x" (duped key + value) and duped key "b" must all be freed.
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("{\"a\":\"x\",\"b\" 2}");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValueFromReader(&tokenizer));
+}
+
+test "ReaderTokenizer readValue object malformed value does not leak duped key" {
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("{\"a\":\"x\",\"b\":@}");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
+    defer tokenizer.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, readValueFromReader(&tokenizer));
 }
