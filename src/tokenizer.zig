@@ -16,6 +16,7 @@
 const std = @import("std");
 const unicode = @import("unicode.zig");
 const json = @import("json.zig");
+const number_mod = @import("number.zig");
 
 /// Token types returned by the tokenizer
 pub const TokenType = enum {
@@ -498,7 +499,7 @@ fn readValueDepth(tokenizer: *Tokenizer, depth: usize) TokenizerError!json.Value
         .true_literal => .{ .bool = true },
         .false_literal => .{ .bool = false },
         .string => .{ .str = tokenizer.allocator.dupe(u8, token.bytes) catch return error.OutOfMemory },
-        .number => .{ .num = parseNumberToken(token.bytes) },
+        .number => .{ .num = try parseNumberToken(tokenizer.allocator, token.bytes) },
         .array_start => try readArray(tokenizer, depth + 1),
         .object_start => try readObject(tokenizer, depth + 1),
         .eof => error.UnexpectedEof,
@@ -507,9 +508,20 @@ fn readValueDepth(tokenizer: *Tokenizer, depth: usize) TokenizerError!json.Value
 }
 
 /// Free memory allocated by readValue
+///
+/// Note: unlike the public `json.freeValue` (which treats `.num` as
+/// allocation-free because the main parser's numbers borrow into the arena),
+/// the streaming tokenizer's `.num` values OWN both `digits` and `lexeme`:
+/// `parseNumberToken` dupes the lexeme and `number.parseNumber` allocates the
+/// normalized digit string. Both must be freed here -- matching `async.zig`'s
+/// `freeValue` -- with no double-free (they are two distinct allocations).
 pub fn freeValue(allocator: std.mem.Allocator, value: json.Value) void {
     switch (value) {
-        .null, .bool, .num => {}, // no allocation
+        .null, .bool => {}, // no allocation
+        .num => |n| {
+            allocator.free(n.digits);
+            allocator.free(n.lexeme);
+        },
         .str => |s| allocator.free(s),
         .arr => |arr| {
             for (arr) |item| {
@@ -527,67 +539,30 @@ pub fn freeValue(allocator: std.mem.Allocator, value: json.Value) void {
     }
 }
 
-fn parseNumberToken(lexeme: []const u8) json.Number {
-    // Parse the number lexeme into a normalized Number
-    var sign: i8 = 1;
-    var start: usize = 0;
-
-    if (lexeme.len > 0 and lexeme[0] == '-') {
-        sign = -1;
-        start = 1;
-    }
-
-    // Find integer and fraction parts
-    var int_end = start;
-    while (int_end < lexeme.len and lexeme[int_end] >= '0' and lexeme[int_end] <= '9') {
-        int_end += 1;
-    }
-
-    var frac_start: usize = int_end;
-    var frac_end: usize = int_end;
-    if (int_end < lexeme.len and lexeme[int_end] == '.') {
-        frac_start = int_end + 1;
-        frac_end = frac_start;
-        while (frac_end < lexeme.len and lexeme[frac_end] >= '0' and lexeme[frac_end] <= '9') {
-            frac_end += 1;
-        }
-    }
-
-    // Parse exponent
-    var exp10: i32 = 0;
-    var exp_idx = frac_end;
-    if (exp_idx < lexeme.len and (lexeme[exp_idx] == 'e' or lexeme[exp_idx] == 'E')) {
-        exp_idx += 1;
-        var exp_sign: i32 = 1;
-        if (exp_idx < lexeme.len and lexeme[exp_idx] == '-') {
-            exp_sign = -1;
-            exp_idx += 1;
-        } else if (exp_idx < lexeme.len and lexeme[exp_idx] == '+') {
-            exp_idx += 1;
-        }
-        while (exp_idx < lexeme.len and lexeme[exp_idx] >= '0' and lexeme[exp_idx] <= '9') {
-            exp10 = exp10 * 10 + @as(i32, @intCast(lexeme[exp_idx] - '0'));
-            exp_idx += 1;
-        }
-        exp10 *= exp_sign;
-    }
-
-    // Adjust exponent for fraction digits
-    if (frac_end > frac_start) {
-        exp10 -= @intCast(frac_end - frac_start);
-    }
-
-    // Build digits string (integer + fraction without decimal point)
-    const digits = if (frac_end > frac_start)
-        lexeme[start..int_end] // We'll need to concatenate, but for now just use integer part
-    else
-        lexeme[start..int_end];
-
-    return .{
-        .lexeme = lexeme,
-        .sign = sign,
-        .digits = digits,
-        .exp10 = exp10,
+/// Build a canonically-normalized `Number` from a numeric lexeme.
+///
+/// This routes through `number.parseNumber` -- exactly as `parser.zig` and
+/// `async.zig` do -- so the streaming tokenizer agrees bit-for-bit with the
+/// main and async parsers under `compare`/`isInteger`/`Value.eql`. Routing
+/// through the shared routine fixes two bugs the old hand-rolled normalizer had:
+///
+///   1. An unchecked `exp10 = exp10 * 10 + digit` (and `@intCast` of the
+///      fractional length) that panicked with "integer overflow" on adversarial
+///      input such as `"1e99999999999"`. `parseNumber` saturates the exponent.
+///   2. A fractional lexeme produced `digits = <integer part only>`, so `1.5`
+///      decoded as `0.1`. `parseNumber` builds the full digit string.
+///
+/// `lexeme` borrows from a tokenizer-owned buffer (`self.input` for the slice
+/// path, `number_buffer` for the reader path) that is reused/freed out from
+/// under the returned token. We therefore dupe it -- mirroring `async.zig` --
+/// so the returned `Number.lexeme` and the buffer `parseNumber` reads/normalizes
+/// are the same independently-owned allocation. Both `lexeme` and `digits` are
+/// heap-owned and released by this module's `freeValue` for `.num`.
+fn parseNumberToken(allocator: std.mem.Allocator, lexeme: []const u8) error{OutOfMemory}!json.Number {
+    const lexeme_owned = allocator.dupe(u8, lexeme) catch return error.OutOfMemory;
+    errdefer allocator.free(lexeme_owned);
+    return number_mod.parseNumber(lexeme_owned, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
     };
 }
 
@@ -1066,6 +1041,99 @@ test "readValue object malformed value does not leak duped key" {
     defer tokenizer.deinit();
 
     try std.testing.expectError(error.UnexpectedToken, readValue(&tokenizer));
+}
+
+// ----------------------------------------------------------------------------
+// Number parsing correctness + crash regression (NASR-001 / fractional bug)
+//
+// The streaming tokenizer previously hand-rolled number normalization with two
+// bugs: an unchecked i32 exponent accumulation that PANICKED on a huge exponent,
+// and a fractional path that kept only the integer digits (so `1.5` decoded as
+// `0.1`). Both are now routed through `number.parseNumber`, so the streaming
+// path agrees with `json.parse` (the main parser) under `Value.eql`.
+// ----------------------------------------------------------------------------
+
+/// Parse `input` through the slice streaming tokenizer's `readValue`.
+fn streamReadValue(allocator: std.mem.Allocator, input: []const u8) !json.Value {
+    var tokenizer = Tokenizer.init(allocator, input, .{});
+    defer tokenizer.deinit();
+    return readValue(&tokenizer);
+}
+
+test "readValue number agrees with main parser (fractional + exponent)" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{ "1.5", "-3.25e1", "1e2", "0.001", "123.456" };
+    for (cases) |input| {
+        // Streaming tokenizer result.
+        const stream_val = try streamReadValue(allocator, input);
+        defer freeValue(allocator, stream_val);
+        try std.testing.expect(stream_val == .num);
+
+        // Main parser result for the same input.
+        var perr: json.ParseError = undefined;
+        var doc = try json.parse(allocator, input, .{}, &perr);
+        defer doc.deinit();
+        try std.testing.expect(doc.root == .num);
+
+        // The streaming and main parsers must now agree numerically. `Value.eql`
+        // compares numbers via `number.compare` (sign/digits/exp10), proving the
+        // streaming path builds the same canonical form the main parser does.
+        try std.testing.expect(json.Value.eql(stream_val, doc.root));
+        try std.testing.expectEqual(@as(i32, 0), number_mod.compare(stream_val.num, doc.root.num));
+    }
+}
+
+test "readValue 1.5 is not mis-decoded as 0.1 (fractional digits bug)" {
+    const allocator = std.testing.allocator;
+
+    const onefive = try streamReadValue(allocator, "1.5");
+    defer freeValue(allocator, onefive);
+    try std.testing.expect(onefive == .num);
+
+    // Correct normalization: digits "15", exp10 -1 -> 1.5.
+    try std.testing.expectEqualStrings("15", onefive.num.digits);
+    try std.testing.expectEqual(@as(i32, -1), onefive.num.exp10);
+
+    // The specific bug: 1.5 must NOT equal 0.1. Build 0.1 the same way and
+    // assert inequality so a regression to "integer part only" is caught.
+    const onetenth = try streamReadValue(allocator, "0.1");
+    defer freeValue(allocator, onetenth);
+    try std.testing.expect(!json.Value.eql(onefive, onetenth));
+}
+
+test "readValue huge exponent does not crash (NASR-001)" {
+    const allocator = std.testing.allocator;
+
+    // Before the fix these panicked with "integer overflow" in Debug/ReleaseSafe.
+    // Now the exponent saturates and parsing succeeds with a defined value.
+    {
+        const v = try streamReadValue(allocator, "1e99999999999");
+        defer freeValue(allocator, v);
+        try std.testing.expect(v == .num);
+        // Lexeme is preserved verbatim for round-tripping.
+        try std.testing.expectEqualStrings("1e99999999999", v.num.lexeme);
+    }
+    {
+        const v = try streamReadValue(allocator, "1e-99999999999");
+        defer freeValue(allocator, v);
+        try std.testing.expect(v == .num);
+        try std.testing.expectEqualStrings("1e-99999999999", v.num.lexeme);
+    }
+}
+
+test "readValue number path frees owned digits/lexeme (no leak/double-free)" {
+    // std.testing.allocator detects leaks AND double-frees. Exercise the number
+    // path directly and inside a container so the recursive free is covered.
+    const allocator = std.testing.allocator;
+
+    const v = try streamReadValue(allocator, "123.456");
+    defer freeValue(allocator, v);
+    try std.testing.expect(v == .num);
+
+    const arr = try streamReadValue(allocator, "[1.5, 2e3, -0.001]");
+    defer freeValue(allocator, arr);
+    try std.testing.expect(arr == .arr);
+    try std.testing.expectEqual(@as(usize, 3), arr.arr.len);
 }
 
 // ============================================================================
@@ -1577,7 +1645,7 @@ fn readValueFromReaderDepth(tokenizer: anytype, depth: usize) ReaderTokenizerErr
         .true_literal => .{ .bool = true },
         .false_literal => .{ .bool = false },
         .string => .{ .str = tokenizer.allocator.dupe(u8, token.bytes) catch return error.OutOfMemory },
-        .number => .{ .num = parseNumberToken(token.bytes) },
+        .number => .{ .num = try parseNumberToken(tokenizer.allocator, token.bytes) },
         .array_start => try readArrayFromReader(tokenizer, depth + 1),
         .object_start => try readObjectFromReader(tokenizer, depth + 1),
         .eof => error.UnexpectedEof,
@@ -1954,4 +2022,61 @@ test "ReaderTokenizer readValue object malformed value does not leak duped key" 
     defer tokenizer.deinit();
 
     try std.testing.expectError(error.UnexpectedToken, readValueFromReader(&tokenizer));
+}
+
+// ----------------------------------------------------------------------------
+// Reader-path number correctness + crash regression (NASR-001 / fractional bug)
+//
+// The reader path shared the same buggy `parseNumberToken`. It additionally had
+// a latent dangling-pointer bug: the returned `Number` borrowed `number_buffer`,
+// which is cleared on the next number and freed on deinit. Routing through
+// `parseNumberToken` (which now dupes the lexeme + allocates `digits`) fixes the
+// dangling pointer too. These tests run under `std.testing.allocator` so a leak
+// or double-free is caught.
+// ----------------------------------------------------------------------------
+
+test "ReaderTokenizer number agrees with main parser (fractional + exponent)" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{ "1.5", "-3.25e1", "1e2", "0.001", "123.456" };
+    for (cases) |input| {
+        var reader: std.Io.Reader = .fixed(input);
+        var tokenizer = try readerTokenizer(allocator, &reader, .{});
+        defer tokenizer.deinit();
+
+        const stream_val = try readValueFromReader(&tokenizer);
+        defer freeValue(allocator, stream_val);
+        try std.testing.expect(stream_val == .num);
+
+        var perr: json.ParseError = undefined;
+        var doc = try json.parse(allocator, input, .{}, &perr);
+        defer doc.deinit();
+        try std.testing.expect(doc.root == .num);
+
+        try std.testing.expect(json.Value.eql(stream_val, doc.root));
+    }
+}
+
+test "ReaderTokenizer 1.5 is not mis-decoded as 0.1 (fractional digits bug)" {
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("1.5");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
+    defer tokenizer.deinit();
+
+    const v = try readValueFromReader(&tokenizer);
+    defer freeValue(allocator, v);
+    try std.testing.expect(v == .num);
+    try std.testing.expectEqualStrings("15", v.num.digits);
+    try std.testing.expectEqual(@as(i32, -1), v.num.exp10);
+}
+
+test "ReaderTokenizer huge exponent does not crash (NASR-001)" {
+    const allocator = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed("1e99999999999");
+    var tokenizer = try readerTokenizer(allocator, &reader, .{});
+    defer tokenizer.deinit();
+
+    const v = try readValueFromReader(&tokenizer);
+    defer freeValue(allocator, v);
+    try std.testing.expect(v == .num);
+    try std.testing.expectEqualStrings("1e99999999999", v.num.lexeme);
 }
