@@ -5,11 +5,11 @@
     .fingerprint = 0x6b072545e19eebb4,
     .dependencies = .{
         .uri = .{
-            .url = "git+https://gitlab.com/devnw/zig/uri.git#612c08200c82cbc4b439af413d3e7a600a98c38f",
-            .hash = "uri-0.1.6-zVvOsdSkAgDekp80OS-5ynsW2dl4FKZz969H-O_aJlQp",
+            .url = "git+https://gitlab.com/devnw/zig/uri.git?ref=v0.1.12#bed3d54361e2057f85343c5d964f2bde0f47f76d",
+            .hash = "uri-0.1.6-zVvOsd-kAgAPJvgL6WS0cbbXxvNc8D41SAhgy3LIz37a",
         },
         .thread_pool = .{
-            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#d45eb0a772f7c017aae088bfdd11164525362777",
+            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git?ref=v0.2.5#d45eb0a772f7c017aae088bfdd11164525362777",
             .hash = "thread_pool-0.2.5-11B1BomFeQCd1mA9ZE-IdwArqRfiDhA1nGKvjLwpMjkw",
         },
     },
