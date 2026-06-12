@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-06-11
+
+Security, correctness, and robustness hardening across the whole library, from an
+iterative application-security review plus a code-quality/performance/gap audit
+(converged after five review passes; test count 305 → 466, green in Debug,
+ReleaseSafe, ReleaseFast, and ReleaseSmall).
+
+### Security / robustness (untrusted input)
+
+- Fixed numerous process-aborting crashes reachable from a few bytes of untrusted
+  input: number-exponent `i32` overflow on the primary parse path, the streaming
+  tokenizer's exponent overflow, `Duration.fromIso8601` `@intFromFloat(inf)`,
+  JSONPath `minInt(i64)` index negation, `isMultipleOf` `u64` overflow, the CBOR
+  array/map length-prefix OOM, CBOR tag-chain / nested-indefinite-string stack
+  overflow, and an `@enumFromInt` abort when unmarshaling out-of-range enum values.
+- Fixed memory-safety bugs: a regex quantified-char-class double-free, OOM-path
+  double-frees in JSON Patch, a `RemoteContextLoader` use-after-free, and many
+  error-path leaks (CBOR, tokenizer, unmarshal, JSON-LD) that previously leaked
+  partially-built values.
+- Bounded previously-unbounded work: recursion-depth limits enforced in the
+  streaming tokenizer, JSON-LD processor (plus `@context` cycle detection), the
+  serializers, and the schema compiler/validator; a per-query node-visit budget
+  for JSONPath recursive descent; CBOR length caps; and a regex compile-size cap.
+- Closed validation bypasses: schema `$ref` depth-exceed and unknown JSONPath
+  filter predicates now fail closed; the regex engine returns
+  `error.UnsupportedPattern` for groups/alternation instead of silently
+  mis-compiling them.
+- The streaming tokenizer now validates UTF-8 (rejecting overlong encodings and
+  surrogates), closing a parser-differential with the slice parser.
+
+### Fixed (correctness)
+
+- The streaming tokenizer parsed fractional numbers incorrectly (`1.5` decoded as
+  `0.1`); all number paths now route through the canonical `number.parseNumber`.
+- `parseIntKeyword` honors the decimal exponent (`1e2` → 100); the parallel batch
+  helpers no longer drop a tail of up to 63 elements (which returned uninitialized
+  memory and wrong sums).
+
+### Changed
+
+- `minimum_zig_version` aligned to `0.16.0`; dependencies bumped to `uri` v0.1.6
+  and `thread-pool` v0.2.5.
+- The internal dead `uri` module was removed; `json.uri_mod` now re-exports the
+  external `uri` dependency the validator actually uses.
+- Documentation now accurately describes the SIMD primitives as opt-in (not wired
+  into the default scalar parser) and discloses that regex alternation/grouping
+  and the JSONPath function extensions are not implemented.
+
 ## [0.1.0] - 2026-01-24
 
 Initial public release under Apache-2.0 license.
