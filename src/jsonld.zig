@@ -247,12 +247,21 @@ pub const RemoteContextLoader = struct {
 
             // Evict oldest entry if cache is full
             if (self.cache.count() >= self.max_cache_size) {
-                // Simple eviction: remove first entry
+                // Simple eviction: remove first entry.
+                //
+                // NEW-005: capture the key, stop using the iterator, then
+                // `fetchRemove` BEFORE freeing anything. The previous code freed
+                // the key and then called `remove(first.key_ptr.*)`, which hashes
+                // and compares the just-freed key pointer -- a use-after-free
+                // read. `fetchRemove` returns the removed entry while the key is
+                // still valid; only then do we free the owned key and value.
                 var iter = self.cache.iterator();
                 if (iter.next()) |first| {
-                    self.allocator.free(first.key_ptr.*);
-                    freeValue(self.allocator, first.value_ptr.context);
-                    _ = self.cache.remove(first.key_ptr.*);
+                    const key = first.key_ptr.*;
+                    if (self.cache.fetchRemove(key)) |kv| {
+                        freeValue(self.allocator, kv.value.context);
+                        self.allocator.free(kv.key);
+                    }
                 }
             }
 
@@ -711,9 +720,18 @@ pub const Processor = struct {
         if (depth > self.options.max_depth) return Error.MaxDepthExceeded;
 
         const result = try active_context.clone();
+        // NEW-004: `result` is a disposable clone of `active_context` that this
+        // function owns until it is either returned or superseded. The `.arr`
+        // and `.str` branches reassign the live context as they iterate/recurse
+        // and free the prior one in place; `errdefer_target` tracks whichever
+        // context is currently live so this error cleanup frees it exactly once
+        // and never double-frees a context already freed in-loop. On the success
+        // path this errdefer never fires (it is error-only) and the final live
+        // context is handed to the caller.
+        var errdefer_target = result;
         errdefer {
-            result.deinit();
-            self.allocator.destroy(result);
+            errdefer_target.deinit();
+            self.allocator.destroy(errdefer_target);
         }
 
         switch (local_context) {
@@ -750,7 +768,22 @@ pub const Processor = struct {
                     }
                 }
 
-                return self.processContext(result, loaded, depth + 1);
+                // NEW-004: the recursive call CLONES `result` (it does not
+                // consume it), so `result` would be orphaned/leaked the same
+                // way the `.arr` seed was. The recursive call needs `result`
+                // live for its internal clone, so we cannot free `result`
+                // first. Capture the recursive result, then free the now-dead
+                // seed `result` and return.
+                //
+                // On the error path the recursive call propagates before
+                // `processed` is bound; the function-level errdefer (which
+                // still targets `result`) frees the seed exactly once -- no
+                // double-free, because `result` is freed below ONLY on the
+                // success path where the errdefer never fires.
+                const processed = try self.processContext(result, loaded, depth + 1);
+                result.deinit();
+                self.allocator.destroy(result);
+                return processed;
             },
             .obj => |obj| {
                 // JSON-LD 1.1 @import (Section 4.1.2): resolve the referenced
@@ -840,14 +873,27 @@ pub const Processor = struct {
                 }
             },
             .arr => |arr| {
-                // Process array of contexts in order
+                // Process array of contexts in order.
+                //
+                // NEW-004: each recursive `processContext` CLONES `current`
+                // (it does not consume it), so after every iteration the prior
+                // `current` is orphaned and must be freed -- including the seed
+                // clone `result` on the first iteration. The old `if (i > 0)`
+                // guard skipped freeing the seed, leaking one Context per call.
+                //
+                // To avoid double-freeing with the function-level errdefer we
+                // advance `errdefer_target` to the new live context BEFORE
+                // freeing the old one: if `processContext` below errors on a
+                // later iteration, the errdefer frees only the still-live
+                // `current` (already freed seeds are no longer referenced).
                 var current = result;
-                for (arr, 0..) |ctx, i| {
+                for (arr) |ctx| {
                     const processed = try self.processContext(current, ctx, depth + 1);
-                    if (i > 0) {
-                        current.deinit();
-                        self.allocator.destroy(current);
-                    }
+                    // `processed` is now the live context; make the errdefer
+                    // target it, then free the superseded `current`.
+                    errdefer_target = processed;
+                    current.deinit();
+                    self.allocator.destroy(current);
                     current = processed;
                 }
                 return current;
@@ -1789,6 +1835,50 @@ test "RemoteContextLoader clearCache" {
     try std.testing.expectEqual(@as(usize, 0), loader.getCacheStats().hits);
 }
 
+// NEW-005: fetch function for the cache-eviction UAF test. The loader frees the
+// returned content with its own allocator, so the content must be allocated by
+// the same allocator. A bare `fn` pointer carries no allocator, so the test
+// publishes one here before driving the loader.
+var new005_fetch_allocator: ?std.mem.Allocator = null;
+fn new005FetchFn(url: []const u8) RemoteContextLoader.FetchError![]const u8 {
+    _ = url;
+    const a = new005_fetch_allocator orelse return error.NetworkError;
+    // Minimal valid JSON object; parsed and cached by loadContext.
+    return a.dupe(u8, "{}") catch return error.NetworkError;
+}
+
+test "NEW-005: cache eviction does not use freed key (no UAF)" {
+    // Leak/UAF-detecting allocator (NOT an arena): a use-after-free read of the
+    // evicted key and any leak of the evicted entry are caught here.
+    const allocator = std.testing.allocator;
+
+    var loader = RemoteContextLoader.init(allocator);
+    defer loader.deinit();
+
+    // Shrink the cache so a single extra load forces an eviction.
+    loader.max_cache_size = 2;
+    new005_fetch_allocator = allocator;
+    defer new005_fetch_allocator = null;
+    loader.setFetchFunction(new005FetchFn);
+
+    // Fill the cache to capacity with real heap-owned keys/values (preload dupes
+    // the URL key with `allocator`, so eviction must free it with `allocator`).
+    var ctx_a = [_]json.Member{.{ .k = "a", .v = .{ .str = "http://schema.org/a" } }};
+    var ctx_b = [_]json.Member{.{ .k = "b", .v = .{ .str = "http://schema.org/b" } }};
+    try loader.preloadContext("https://example.org/a.jsonld", try cloneValue(allocator, .{ .obj = &ctx_a }));
+    try loader.preloadContext("https://example.org/b.jsonld", try cloneValue(allocator, .{ .obj = &ctx_b }));
+    try std.testing.expectEqual(@as(usize, 2), loader.getCacheStats().size);
+
+    // A fresh load (miss) triggers the eviction branch. Before the fix this
+    // hashed/compared the just-freed key pointer -> UAF; after the fix it
+    // fetchRemoves while the key is still live.
+    const loaded = loader.loadContext("https://example.org/c.jsonld");
+    try std.testing.expect(loaded != null);
+
+    // Cache stayed at capacity (one evicted, one inserted).
+    try std.testing.expectEqual(@as(usize, 2), loader.getCacheStats().size);
+}
+
 // =============================================================================
 // JSON-LD Edge Case Tests
 // =============================================================================
@@ -2077,6 +2167,114 @@ test "GAP-009: @import with no loader returns ContextImportFailed (not dropped)"
 
     try std.testing.expectError(
         Error.ContextImportFailed,
+        processor.expand(.{ .obj = &doc_members }),
+    );
+}
+
+test "NEW-004: array @context expansion does not leak a Context per call" {
+    // Leak-detecting allocator (NOT an arena): before the fix the `.arr` branch
+    // of processContext orphaned its seed clone every call (the `if (i > 0)`
+    // guard skipped freeing iteration 0's seed), leaking one Context. This must
+    // be clean now.
+    const allocator = std.testing.allocator;
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    // Array @context with two object entries -> two loop iterations, each
+    // superseding the prior live context. All seeds must be freed exactly once.
+    var ctx0 = [_]json.Member{.{ .k = "name", .v = .{ .str = "http://schema.org/name" } }};
+    var ctx1 = [_]json.Member{.{ .k = "age", .v = .{ .str = "http://schema.org/age" } }};
+    var ctx_arr = [_]json.Value{ .{ .obj = &ctx0 }, .{ .obj = &ctx1 } };
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .arr = &ctx_arr } },
+        .{ .k = "name", .v = .{ .str = "x" } },
+    };
+
+    const result = try processor.expand(.{ .obj = &doc_members });
+    defer freeValue(allocator, result);
+
+    // The array context defines `name` -> http://schema.org/name, so expansion
+    // must rename the `name` key to that IRI (proves the array was applied).
+    try std.testing.expect(result == .obj);
+    var found = false;
+    for (result.obj) |m| {
+        if (std.mem.eql(u8, m.k, "http://schema.org/name")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "NEW-004: single-object @context control is leak-free" {
+    // Control: a single-object @context never hit the `.arr` seed-orphan bug;
+    // this guards against a regression in the shared clone/free ownership.
+    const allocator = std.testing.allocator;
+
+    var processor = Processor.init(allocator, .{});
+    defer processor.deinit();
+
+    var ctx_members = [_]json.Member{.{ .k = "name", .v = .{ .str = "http://schema.org/name" } }};
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .obj = &ctx_members } },
+        .{ .k = "name", .v = .{ .str = "x" } },
+    };
+
+    const result = try processor.expand(.{ .obj = &doc_members });
+    defer freeValue(allocator, result);
+    try std.testing.expect(result == .obj);
+}
+
+test "NEW-004: string/URL @context expansion does not leak the seed clone" {
+    // Leak-detecting allocator: the `.str` branch returned the recursive call's
+    // result while orphaning its seed clone `result`. With a loader configured,
+    // a URL-valued @context must expand cleanly with no leak.
+    const allocator = std.testing.allocator;
+
+    // `importLoader` resolves https://example.org/base.jsonld -> object context
+    // {name -> http://schema.org/name} (defined above for the GAP-009 tests).
+    var processor = Processor.init(allocator, .{
+        .document_loader = importLoader,
+    });
+    defer processor.deinit();
+
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .str = "https://example.org/base.jsonld" } },
+        .{ .k = "name", .v = .{ .str = "x" } },
+    };
+
+    const result = try processor.expand(.{ .obj = &doc_members });
+    defer freeValue(allocator, result);
+
+    try std.testing.expect(result == .obj);
+    var found = false;
+    for (result.obj) |m| {
+        if (std.mem.eql(u8, m.k, "http://schema.org/name")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "NEW-004: array @context error path frees live context without double-free" {
+    // A two-element array @context where the SECOND entry is an unresolvable
+    // URL-valued context (no loader) forces an error AFTER the first iteration
+    // already freed the seed in-loop. The function-level errdefer must free only
+    // the still-live context (the one produced by iteration 0), not the freed
+    // seed -- proving no double-free and no leak on the error unwind.
+    const allocator = std.testing.allocator;
+
+    var processor = Processor.init(allocator, .{}); // no document_loader
+    defer processor.deinit();
+
+    var ctx0 = [_]json.Member{.{ .k = "name", .v = .{ .str = "http://schema.org/name" } }};
+    var ctx_arr = [_]json.Value{
+        .{ .obj = &ctx0 },
+        .{ .str = "https://example.org/missing.jsonld" }, // unresolvable -> error
+    };
+    var doc_members = [_]json.Member{
+        .{ .k = "@context", .v = .{ .arr = &ctx_arr } },
+        .{ .k = "name", .v = .{ .str = "x" } },
+    };
+
+    try std.testing.expectError(
+        Error.ContextNotLoaded,
         processor.expand(.{ .obj = &doc_members }),
     );
 }
