@@ -26,12 +26,12 @@
 
 | Gap-ID | Requirement / Feature | Status | Severity | Location |
 |--------|----------------------|--------|----------|----------|
-| GAP-001 | ECMA-262 regex: alternation `\|` and grouping `()` silently discarded | Partial | Critical | `src/regex_ecma262.zig:263-270` |
+| GAP-001 | ECMA-262 regex: alternation `\|` and grouping `()` | Resolved (implemented) | Critical | `src/regex_ecma262.zig` |
 | GAP-002 | Schema `$ref` depth-exceed silently returns valid (no `RefDepthLimit` error) | Partial | High | `src/schema.zig:1058` |
 | GAP-003 | Streaming tokenizer ignores `max_depth` / `max_string_len` options | Partial | High | `src/tokenizer.zig:65-68` |
 | GAP-004 | ECMA-262 `\s`/`\S` missing form-feed, vertical-tab, NBSP, other Unicode whitespace | Partial | Medium | `src/regex_ecma262.zig:146-153` |
 | GAP-005 | JSONPath function extensions absent (`length()`, `match()`, `search()`, `value()`, `count()`, `keys()`) | Partial | Medium | `src/jsonpath.zig` |
-| GAP-006 | SIMD utilities never wired into parser or tokenizer (dead code) | Not Implemented | Medium | `src/simd.zig` |
+| GAP-006 | SIMD utilities never wired into parser or tokenizer (dead code) | Resolved (implemented) | Medium | `src/simd.zig`, `src/parser.zig` |
 | GAP-007 | ROADMAP/docs advertise `BatchProcessor.findAllStructurals()` which does not exist | Not Implemented | Low | `src/simd.zig`, `docs/ROADMAP.md:728` |
 | GAP-008 | `AsyncIterator.next()` is a stub returning `null` unconditionally | Partial | High | `src/async.zig:1054-1057` |
 | GAP-009 | JSON-LD `@import` context keyword silently skipped; blank-node counter is global mutable state | Partial | Medium | `src/jsonld.zig:619-680,970` |
@@ -54,12 +54,12 @@ the external suite is absent).
 
 | Gap-ID | Status | Resolution |
 |--------|--------|-----------|
-| GAP-001 | Resolved (fail-closed) | Regex groups/alternation now return `error.UnsupportedPattern` instead of silently mis-compiling. Full alternation/grouping support is deferred feature work (disclosed in ROADMAP/API). |
+| GAP-001 | Resolved (implemented) | Regex alternation `\|` and grouping `()` are now fully implemented as a Pike NFA (replacing the fail-closed subset), with bounded repetition, a total-instruction cap, a parser depth bound, and a global step budget. JSON Schema `pattern`/`patternProperties` alternation now validates correctly. Groups are non-capturing; capture-group *extraction* remains deferred (not required by `pattern` validation). |
 | GAP-002 | Resolved | `$ref` depth-exceed records an error and reports invalid. |
 | GAP-003 | Resolved | Tokenizer enforces `max_depth`/`max_string_len`. |
 | GAP-004 | Resolved | `\s`/`\S` include form-feed and vertical-tab. |
 | GAP-005 | Resolved (fail-closed) | Unknown JSONPath filter predicates now fail closed. RFC 9535 function extensions deferred (disclosed in ROADMAP/API). |
-| GAP-006 | Resolved (by decision) | SIMD documented as opt-in; not wired into the scalar default parser. |
+| GAP-006 | Resolved (implemented) | SIMD whitespace/string scanners (`skipWhitespaceSIMD`/`scanStringSIMD`) are now wired into the strict parser's hot path — a no-escape string fast-path (single `dupe`) plus SIMD whitespace skipping, alongside small-object linear key dedup (~44–52% higher string/object parse throughput). |
 | GAP-007 | Resolved | Removed the nonexistent `findAllStructurals` doc example. |
 | GAP-008 | Resolved | `AsyncIterator.next` implemented. |
 | GAP-009 | Resolved | `@import` resolved/merged; blank-node counter per-instance. |
@@ -67,6 +67,52 @@ the external suite is absent).
 | GAP-011 | Resolved | Parallel chunking covers the full input. |
 | GAP-012 | Resolved | Schema suite skips gracefully when fixtures are absent; CI clone pinned to a SHA. |
 
-**Deferred features (tracked, not bugs):** regex alternation/grouping; JSONPath
-function extensions; SIMD wiring into the default parser; JSON-LD built-in remote
-context fetching; JSON Patch in-place/copy-on-write.
+## Deferred / Accepted by Design
+
+The following were evaluated and **intentionally not implemented**. They are
+tracked, justified trade-offs — **not open defects**. None is an untrusted-input
+memory-safety or DoS exposure (those are closed); each is a feature addition, an
+unneeded capability, a deliberate safety/speed choice, or a security-motivated
+no-op.
+
+| Item | Disposition | Rationale | Cross-reference |
+|------|-------------|-----------|-----------------|
+| **CBOR datetime/bignum tag round-trip** | Deferred — feature | Tag *safety* (depth limit, bounded allocation, valid free) is closed. Preserving tag *semantics* (datetime tag 0/1, bignum tag 2/3) is a feature; decode currently unwraps and discards the tag number. | ROADMAP CBOR section; `src/cbor.zig` |
+| **Regex capturing-group *extraction*** | Deferred — not needed | Alternation `\|` and grouping `()` are now implemented (Pike NFA); groups are **non-capturing**, which is exactly what JSON Schema `pattern`/`patternProperties` require. No public feature consumes captures. | GAP-001; `src/regex_ecma262.zig` |
+| **JSONPath RFC 9535 function extensions** | Deferred — feature | `length()`/`match()`/`search()`/`value()`/`count()`/`keys()` are not implemented; unknown filter predicates fail closed. | GAP-005; `src/jsonpath.zig` |
+| **Several micro-performance items** | Deferred — low value / safety-first | Small allocation/scan overheads, some of which are the deliberate cost of memory-safety fixes (owning number lexemes), or would change the public `Value` layout, or carry correctness risk for negligible gain. The dominant parser/serializer hot paths are optimized. | `PERF_GAP_ANALYSIS.md` |
+| **Inert, no-network JSON-LD remote loader** | Accepted — by design (security) | Implicit network fetch of attacker-controlled `@context`/`$ref` URLs would be an SSRF primitive. The remote-context loader is intentionally inert; callers opt in via their own allowlisting `document_loader`, or preload contexts into the cache. | GAP-010; `src/jsonld.zig` |
+| **JSON Patch in-place / copy-on-write** | Deferred — feature | `apply` returns a new value (does not mutate the original); an in-place / COW variant is future work. | `src/patch.zig` |
+
+### Detail
+
+- **CBOR datetime/bignum tag round-trip (feature, deferred).** The CBOR decoder
+  handles tags safely (depth limit, bounded definite-length allocation,
+  heap-owned float/NaN/Infinity lexemes), but does not preserve tag *meaning*: a
+  datetime (tag 0/1) or bignum (tag 2/3) is unwrapped to its bare underlying
+  value and the tag number is dropped, so semantics do not round-trip.
+  Tag-aware encode/decode is a future release.
+
+- **Regex capturing groups (unneeded, deferred).** The ECMA-262 engine is now a
+  Pike NFA with working alternation and grouping; groups are non-capturing
+  because `pattern`/`patternProperties` only need a boolean match decision. No
+  other public feature exposes captures. Capture extraction is a future
+  enhancement, not a correctness gap for the advertised surface.
+
+- **Micro-performance items (deferred, safety-first).** The dominant parser hot
+  paths are optimized (SIMD whitespace/string scan, no-escape string fast-path,
+  small-object linear dedup, removed O(n²) leading-zero strip). The remaining
+  items in `PERF_GAP_ANALYSIS.md` are deliberately deferred: extra small
+  allocations per CBOR float / streamed number are the *cost* of memory-safety
+  fixes (reducing them re-introduces lexeme/digits aliasing — a use-after-free
+  hazard); a `Value`/`Number` layout change would break the public API; and a
+  whitespace line/col popcount carries error-position correctness risk for
+  negligible gain.
+
+- **Inert no-network JSON-LD remote loader (accepted by design).** The
+  remote-context loader performs no network I/O. This is a security decision:
+  automatically fetching attacker-controlled `@context` / external `$ref` URLs
+  would be a server-side request forgery (SSRF) primitive. Callers that need
+  remote contexts supply their own allowlisting `document_loader`, or preload
+  contexts into the cache. A URL context with no caller-supplied loader returns
+  an error (fail-closed) rather than silently succeeding.

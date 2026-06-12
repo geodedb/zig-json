@@ -15,9 +15,10 @@ This document outlines planned features for zig-json, organized by priority. Eac
 
 - [x] RFC 8259 compliant JSON parsing
 - [x] JSON Schema 2020-12 validation
-- [x] ECMA-262 regex pattern support (subset: alternation `|` and grouping
-      `()` are not implemented — patterns using them return
-      `error.UnsupportedPattern` rather than matching incorrectly)
+- [x] ECMA-262 regex pattern support, including alternation `|` and grouping
+      `()` (implemented as a Pike NFA; groups are non-capturing — capture-group
+      *extraction* is deferred, which `pattern`/`patternProperties` validation
+      does not require)
 - [x] Zig type to JSON encoding
 - [x] Writer-based streaming output
 - [x] Pretty-print formatting

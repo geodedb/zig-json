@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-06-12
+
+Reconciles a parallel remediation branch onto the v0.1.6 release, adding
+improvements that v0.1.6 did not include. No public API removed (additive only:
+`ValidationReport.deinit`).
+
+### Added
+
+- **ECMA-262 regex now supports alternation `|` and grouping `()`** — the engine
+  was rewritten as a Pike NFA, replacing the previous fail-closed subset that
+  rejected such patterns with `error.UnsupportedPattern`. JSON Schema
+  `pattern`/`patternProperties` with alternation/grouping now validate
+  correctly. Bounded repetition, a total-instruction cap, a parser depth bound,
+  and a global step budget guard against compile-time blow-up and ReDoS. Groups
+  are non-capturing (capture-group extraction remains deferred — not required by
+  `pattern` validation).
+- SIMD whitespace/string scanners wired into the strict parser hot path, plus a
+  no-escape string fast-path and small-object linear key dedup
+  (~44–52% higher string/object parse throughput).
+- `examples/build.zig.zon` and Zig 0.16-migrated example sources so
+  `cd examples && zig build` works (the examples were previously unbuildable).
+- `ValidationReport.deinit(allocator)` convenience for freeing a report.
+
+### Changed
+
+- Regex `match` no longer takes an allocator (uses on-stack scratch with a heap
+  fallback); schema `pattern` call-sites updated accordingly.
+- Documentation reconciled to the implemented state: ROADMAP/API/gap-analysis no
+  longer disclose regex alternation/grouping or SIMD-in-parser as unimplemented;
+  a consolidated "Deferred / Accepted by Design" section in `docs/GAP_ANALYSIS.md`
+  records CBOR tag round-trip, regex capture extraction, JSONPath function
+  extensions, micro-perf items, and the inert no-network JSON-LD loader.
+
 ## [0.1.6] - 2026-06-11
 
 Security, correctness, and robustness hardening across the whole library, from an
