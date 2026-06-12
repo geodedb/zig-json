@@ -523,3 +523,32 @@ regression tests. ASR-020 (regex groups/alternation) is resolved fail-closed
 alternation/grouping and JSONPath functions are fail-closed but unimplemented;
 JSON Patch retains the per-op full-clone cost. These are bounded/by-design and
 tracked in the gap and performance analyses.
+
+### Iteration 4-5: deep-sweep findings (all Resolved → Converged)
+
+Continued adversarial passes after the second-pass batch surfaced progressively
+deeper issues, each fixed with regression tests:
+
+- **NEW-001 (Critical)** — CBOR tag chains / nested indefinite strings bypassed
+  `max_depth` (depth only counted in array/map) → ~500 KB payload stack-overflow
+  abort. Fixed: depth accounting moved into `decodeValue`/`decodeTagged`; nested
+  indefinite strings rejected per RFC 8949.
+- **NEW-002 (High)** — `unmarshal` into an exhaustive enum aborted on an
+  out-of-range number (`@enumFromInt`). Fixed: `std.enums.fromInt` → error.
+- **NEW-003 (High)** — JSONPath recursive descent had no work budget →
+  combinatorial C(D,N) CPU/memory DoS. Fixed: per-query node-visit budget
+  (1,000,000) → `error.QueryTooComplex`.
+- **NEW-004 (Medium)** — array/string `@context` expansion leaked a `Context`
+  per call. Fixed: free the seed clone exactly once (errdefer-target tracking).
+- **NEW-005 (Low)** — `RemoteContextLoader` cache eviction used a freed key.
+  Fixed: `fetchRemove` before free.
+
+Also added defense-in-depth: a structural-recursion cap in the schema compiler
+and validator (`max_schema_depth=512`), and a `createTermDefinition` errdefer.
+
+**Convergence (iteration 5):** an exhaustive final appsec sweep of every
+`@enumFromInt`/`@intFromFloat`/`@intCast`/`@truncate`/`@ptrCast`/`unreachable`
+site and every recursive/iterative path found them all range-guarded,
+budget-bounded, or provably unreachable from untrusted input. Both the appsec
+review and the gap/quality/performance audit report **no new findings**. Final
+state: `zig build test` = 466 passing in Debug, ReleaseSafe, and ReleaseFast.
