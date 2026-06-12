@@ -27,7 +27,25 @@ pub const PathError = error{
     InvalidPath,
     SyntaxError,
     OutOfMemory,
+    /// The query exceeded the per-query work budget (`max_visits`). Returned
+    /// to defend against algorithmic-complexity DoS: recursive-descent (`..`)
+    /// segments over a self-similar document can produce a combinatorial
+    /// number of node visits / matches (e.g. C(D, N) for N `..name` segments
+    /// over a tree of depth D) from a tiny, parser-legal input.
+    QueryTooComplex,
 };
+
+/// Per-query node-visit budget. Every time the executor visits/enters a node
+/// during traversal it increments a counter; once the counter exceeds this
+/// cap the query aborts with `error.QueryTooComplex`. This bounds the total
+/// work (and, transitively, the result set) for a single query regardless of
+/// how the untrusted path interacts with the document shape.
+///
+/// The ceiling is deliberately generous so that real-world queries never hit
+/// it; only pathological combinatorial traversals do. 1,000,000 node visits
+/// is far beyond any legitimate query yet trips the combinatorial blowup
+/// (e.g. C(30,10) = 30,045,015 matches) almost immediately.
+const max_visits: usize = 1_000_000;
 
 /// Result of a JSONPath query - a list of matched values
 pub const QueryResult = struct {
@@ -46,11 +64,17 @@ pub fn query(allocator: std.mem.Allocator, root: Value, path: []const u8) PathEr
     defer arena.deinit();
 
     var results: std.ArrayList(Value) = .empty;
+    // On any error (including QueryTooComplex) free the partial results.
+    // The Value entries are borrowed from `root` (not owned copies), so this
+    // frees only the backing array; it never double-frees document data.
     errdefer results.deinit(allocator);
+
+    // Per-query node-visit budget guarding against combinatorial blowup.
+    var visits: usize = 0;
 
     // Parse and execute the path using arena for temporary allocations
     var parser = PathParser.init(path);
-    try executeQuery(arena.allocator(), allocator, root, root, &parser, &results);
+    try executeQuery(arena.allocator(), allocator, root, root, &parser, &results, &visits);
 
     return .{
         .values = try results.toOwnedSlice(allocator),
@@ -370,7 +394,14 @@ fn executeQuery(
     current: Value,
     parser: *PathParser,
     results: *std.ArrayList(Value),
+    visits: *usize,
 ) PathError!void {
+    // Count this node visit and trip the budget if exceeded. Every re-entry
+    // into executeQuery corresponds to processing one node against the
+    // remaining path, so this is the natural place to charge work.
+    visits.* += 1;
+    if (visits.* > max_visits) return error.QueryTooComplex;
+
     const segment = try parser.nextSegment(arena_alloc) orelse {
         // No more segments - add current to results
         try results.append(result_alloc, current);
@@ -379,7 +410,7 @@ fn executeQuery(
 
     switch (segment.seg_type) {
         .root => {
-            try executeQuery(arena_alloc, result_alloc, root, root, parser, results);
+            try executeQuery(arena_alloc, result_alloc, root, root, parser, results, visits);
         },
         .child => {
             if (current == .obj) {
@@ -387,7 +418,7 @@ fn executeQuery(
                     if (std.mem.eql(u8, m.k, segment.name.?)) {
                         // Save parser state and recurse
                         const saved_pos = parser.pos;
-                        try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results);
+                        try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results, visits);
                         parser.pos = saved_pos;
                     }
                 }
@@ -397,13 +428,13 @@ fn executeQuery(
             if (current == .obj) {
                 for (current.obj) |m| {
                     const saved_pos = parser.pos;
-                    try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results);
+                    try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results, visits);
                     parser.pos = saved_pos;
                 }
             } else if (current == .arr) {
                 for (current.arr) |item| {
                     const saved_pos = parser.pos;
-                    try executeQuery(arena_alloc, result_alloc, root, item, parser, results);
+                    try executeQuery(arena_alloc, result_alloc, root, item, parser, results, visits);
                     parser.pos = saved_pos;
                 }
             }
@@ -418,7 +449,7 @@ fn executeQuery(
                 }
                 if (idx >= 0 and idx < @as(i64, @intCast(arr.len))) {
                     const saved_pos = parser.pos;
-                    try executeQuery(arena_alloc, result_alloc, root, arr[@intCast(idx)], parser, results);
+                    try executeQuery(arena_alloc, result_alloc, root, arr[@intCast(idx)], parser, results, visits);
                     parser.pos = saved_pos;
                 }
             }
@@ -444,7 +475,7 @@ fn executeQuery(
                     var i = start;
                     while (i < end) : (i += step) {
                         const saved_pos = parser.pos;
-                        try executeQuery(arena_alloc, result_alloc, root, arr[@intCast(i)], parser, results);
+                        try executeQuery(arena_alloc, result_alloc, root, arr[@intCast(i)], parser, results, visits);
                         parser.pos = saved_pos;
                     }
                 }
@@ -454,7 +485,7 @@ fn executeQuery(
             // Get next segment to know what we're looking for
             const next_seg = try parser.nextSegment(arena_alloc);
             if (next_seg) |seg| {
-                try recursiveDescend(arena_alloc, result_alloc, root, current, seg, parser, results);
+                try recursiveDescend(arena_alloc, result_alloc, root, current, seg, parser, results, visits);
             }
         },
         .filter => {
@@ -462,7 +493,7 @@ fn executeQuery(
                 for (current.arr) |item| {
                     if (evaluateFilter(item, segment.filter_expr.?)) {
                         const saved_pos = parser.pos;
-                        try executeQuery(arena_alloc, result_alloc, root, item, parser, results);
+                        try executeQuery(arena_alloc, result_alloc, root, item, parser, results, visits);
                         parser.pos = saved_pos;
                     }
                 }
@@ -484,7 +515,7 @@ fn executeQuery(
 
                         if (actual_idx < arr.len) {
                             const saved_pos = parser.pos;
-                            try executeQuery(arena_alloc, result_alloc, root, arr[actual_idx], parser, results);
+                            try executeQuery(arena_alloc, result_alloc, root, arr[actual_idx], parser, results, visits);
                             parser.pos = saved_pos;
                         }
                     }
@@ -497,7 +528,7 @@ fn executeQuery(
                         for (current.obj) |m| {
                             if (std.mem.eql(u8, m.k, name)) {
                                 const saved_pos = parser.pos;
-                                try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results);
+                                try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results, visits);
                                 parser.pos = saved_pos;
                                 break;
                             }
@@ -518,7 +549,7 @@ fn executeQuery(
 
                             if (actual_idx < arr.len) {
                                 const saved_pos = parser.pos;
-                                try executeQuery(arena_alloc, result_alloc, root, arr[actual_idx], parser, results);
+                                try executeQuery(arena_alloc, result_alloc, root, arr[actual_idx], parser, results, visits);
                                 parser.pos = saved_pos;
                             }
                         } else |_| {
@@ -540,7 +571,14 @@ fn recursiveDescend(
     target: Segment,
     parser: *PathParser,
     results: *std.ArrayList(Value),
+    visits: *usize,
 ) PathError!void {
+    // Charge a node visit for entering this subtree node. Recursive descent
+    // walks every descendant, so this is what makes the budget bite against a
+    // combinatorial `$..a..a..a...` blowup.
+    visits.* += 1;
+    if (visits.* > max_visits) return error.QueryTooComplex;
+
     // Check current level
     switch (target.seg_type) {
         .child => {
@@ -548,7 +586,7 @@ fn recursiveDescend(
                 for (current.obj) |m| {
                     if (std.mem.eql(u8, m.k, target.name.?)) {
                         const saved_pos = parser.pos;
-                        try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results);
+                        try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results, visits);
                         parser.pos = saved_pos;
                     }
                 }
@@ -558,13 +596,13 @@ fn recursiveDescend(
             if (current == .obj) {
                 for (current.obj) |m| {
                     const saved_pos = parser.pos;
-                    try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results);
+                    try executeQuery(arena_alloc, result_alloc, root, m.v, parser, results, visits);
                     parser.pos = saved_pos;
                 }
             } else if (current == .arr) {
                 for (current.arr) |item| {
                     const saved_pos = parser.pos;
-                    try executeQuery(arena_alloc, result_alloc, root, item, parser, results);
+                    try executeQuery(arena_alloc, result_alloc, root, item, parser, results, visits);
                     parser.pos = saved_pos;
                 }
             }
@@ -575,11 +613,11 @@ fn recursiveDescend(
     // Recurse into children
     if (current == .obj) {
         for (current.obj) |m| {
-            try recursiveDescend(arena_alloc, result_alloc, root, m.v, target, parser, results);
+            try recursiveDescend(arena_alloc, result_alloc, root, m.v, target, parser, results, visits);
         }
     } else if (current == .arr) {
         for (current.arr) |item| {
-            try recursiveDescend(arena_alloc, result_alloc, root, item, target, parser, results);
+            try recursiveDescend(arena_alloc, result_alloc, root, item, target, parser, results, visits);
         }
     }
 }
@@ -973,4 +1011,121 @@ test "jsonpath unknown filter function fails closed" {
 
     // Unsupported function predicate => no items match (fail closed).
     try std.testing.expectEqual(@as(usize, 0), result.values.len);
+}
+
+// NEW-003: recursive-descent (`..`) over a self-similar document is
+// combinatorial. With N `..a` segments over a tree of depth D the number of
+// matches is C(D, N), so a tiny path can force tens of millions of node
+// visits and matches from a small, parser-legal input. The per-query
+// node-visit budget (`max_visits`) must trip and return
+// `error.QueryTooComplex` quickly instead of grinding for seconds.
+//
+// Build a self-similar object `{"a": {"a": {"a": ... }}}` of the given depth.
+fn buildSelfSimilar(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, depth: usize) !void {
+    if (depth == 0) {
+        try buf.appendSlice(allocator, "1");
+        return;
+    }
+    try buf.appendSlice(allocator, "{\"a\":");
+    try buildSelfSimilar(buf, allocator, depth - 1);
+    try buf.appendSlice(allocator, "}");
+}
+
+test "jsonpath recursive descent budget trips on combinatorial blowup" {
+    const allocator = std.testing.allocator;
+
+    // Depth 30 with 10 `..a` segments would (without a budget) produce
+    // C(30,10) = 30,045,015 matches and many seconds of CPU. Keep the input
+    // tiny; the budget should trip almost immediately.
+    var doc_buf: std.ArrayList(u8) = .empty;
+    defer doc_buf.deinit(allocator);
+    try buildSelfSimilar(&doc_buf, allocator, 30);
+
+    var err = json.ParseError.init();
+    var doc = try json.parse(allocator, doc_buf.items, .{}, &err);
+    defer doc.deinit();
+
+    // 10 `..a` segments: "$..a..a..a..a..a..a..a..a..a..a".
+    const path = "$..a..a..a..a..a..a..a..a..a..a";
+
+    try std.testing.expectError(error.QueryTooComplex, query(allocator, doc.root, path));
+}
+
+test "jsonpath recursive descent within budget still works" {
+    // POSITIVE control: a small `$..a..a` over the same self-similar shape
+    // stays well under the budget and returns the correct match count. With
+    // depth D and N `..a` segments the count is C(D, N); for D=5, N=2 that is
+    // C(5,2) = 10.
+    const allocator = std.testing.allocator;
+
+    var doc_buf: std.ArrayList(u8) = .empty;
+    defer doc_buf.deinit(allocator);
+    try buildSelfSimilar(&doc_buf, allocator, 5);
+
+    var err = json.ParseError.init();
+    var doc = try json.parse(allocator, doc_buf.items, .{}, &err);
+    defer doc.deinit();
+
+    var result = try query(allocator, doc.root, "$..a..a");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 10), result.values.len);
+}
+
+test "jsonpath ordinary queries stay well under budget" {
+    // POSITIVE controls: common queries must keep returning correct results.
+    const allocator = std.testing.allocator;
+
+    {
+        const input =
+            \\{"a":{"b":42}}
+        ;
+        var err = json.ParseError.init();
+        var doc = try json.parse(allocator, input, .{}, &err);
+        defer doc.deinit();
+
+        var result = try query(allocator, doc.root, "$.a.b");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), result.values.len);
+        try std.testing.expectEqualStrings("42", result.values[0].num.lexeme);
+    }
+
+    {
+        const input =
+            \\{"a":{"b":{"name":"deep"}},"name":"shallow"}
+        ;
+        var err = json.ParseError.init();
+        var doc = try json.parse(allocator, input, .{}, &err);
+        defer doc.deinit();
+
+        var result = try query(allocator, doc.root, "$..name");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 2), result.values.len);
+    }
+
+    {
+        const input = "[10,20,30]";
+        var err = json.ParseError.init();
+        var doc = try json.parse(allocator, input, .{}, &err);
+        defer doc.deinit();
+
+        var result = try query(allocator, doc.root, "$[*]");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 3), result.values.len);
+    }
+
+    {
+        const input = "{\"a\":1,\"b\":2,\"c\":3}";
+        var err = json.ParseError.init();
+        var doc = try json.parse(allocator, input, .{}, &err);
+        defer doc.deinit();
+
+        var result = try query(allocator, doc.root, "$.*");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 3), result.values.len);
+    }
 }
