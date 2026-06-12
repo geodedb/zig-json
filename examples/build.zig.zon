@@ -1,0 +1,29 @@
+.{
+    .name = .json_examples,
+    .version = "0.1.4",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0xd71703482209cac1,
+    .dependencies = .{
+        // The json library lives in the parent directory; consume it as a
+        // path dependency so `cd examples && zig build` compiles every example
+        // against the in-tree source (GAP-0005).
+        .json = .{
+            .path = "..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "01_basic_parsing.zig",
+        "02_encoding.zig",
+        "03_schema_validation.zig",
+        "04_unmarshaling.zig",
+        "05_field_tags.zig",
+        "06_json_patch.zig",
+        "07_jsonpath.zig",
+        "08_streaming.zig",
+        "09_custom_marshaler.zig",
+        "10_json5.zig",
+        "README.md",
+    },
+}

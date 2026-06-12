@@ -8,7 +8,7 @@ const std = @import("std");
 const json = @import("json");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -131,8 +131,9 @@ pub fn main() !void {
     var parse_err = json.ParseError.init();
 
     const result = json.parse(allocator, invalid_json, .{}, &parse_err);
-    if (result) |*valid_doc| {
-        valid_doc.deinit();
+    if (result) |valid_doc| {
+        var invalid_doc = valid_doc;
+        invalid_doc.deinit();
         std.debug.print("  Unexpectedly parsed invalid JSON\n", .{});
     } else |_| {
         std.debug.print("  Parse error at line {d}, column {d}\n", .{

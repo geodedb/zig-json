@@ -9,7 +9,7 @@ const std = @import("std");
 const json = @import("json");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -218,10 +218,16 @@ pub fn main() !void {
     }
     std.debug.print("\n", .{});
 
-    // Check if any user is admin
-    var admins = try json.jsonpath(allocator, api_doc.root, "$.users[*].roles[?(@ == 'admin')]");
-    defer admins.deinit();
-    std.debug.print("  Has admin users: {}\n", .{admins.values.len > 0});
+    // List every role across all users (filters must test a field, e.g.
+    // `@.active`, so we enumerate roles with a wildcard rather than a bare-`@`
+    // equality filter, which the RFC 9535 evaluator rejects as a syntax error).
+    var roles = try json.jsonpath(allocator, api_doc.root, "$.users[*].roles[*]");
+    defer roles.deinit();
+    var has_admin = false;
+    for (roles.values) |val| {
+        if (val == .str and std.mem.eql(u8, val.str, "admin")) has_admin = true;
+    }
+    std.debug.print("  Has admin users: {}\n", .{has_admin});
 
     std.debug.print("\nAll examples completed successfully!\n", .{});
 }

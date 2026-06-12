@@ -8,7 +8,7 @@ const std = @import("std");
 const json = @import("json");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -34,7 +34,7 @@ pub fn main() !void {
         },
     };
 
-    var after_add = try json.applyPatch(allocator, original.root, &add_ops);
+    const after_add = try json.applyPatch(allocator, original.root, &add_ops);
     defer json.freePatchValue(allocator, after_add);
 
     const add_result = try json.stringify(allocator, after_add);
@@ -53,7 +53,7 @@ pub fn main() !void {
         },
     };
 
-    var after_remove = try json.applyPatch(allocator, original.root, &remove_ops);
+    const after_remove = try json.applyPatch(allocator, original.root, &remove_ops);
     defer json.freePatchValue(allocator, after_remove);
 
     const remove_result = try json.stringify(allocator, after_remove);
@@ -78,7 +78,7 @@ pub fn main() !void {
         },
     };
 
-    var after_replace = try json.applyPatch(allocator, original.root, &replace_ops);
+    const after_replace = try json.applyPatch(allocator, original.root, &replace_ops);
     defer json.freePatchValue(allocator, after_replace);
 
     const replace_result = try json.stringify(allocator, after_replace);
@@ -104,7 +104,7 @@ pub fn main() !void {
         },
     };
 
-    var after_move = try json.applyPatch(allocator, move_doc.root, &move_ops);
+    const after_move = try json.applyPatch(allocator, move_doc.root, &move_ops);
     defer json.freePatchValue(allocator, after_move);
 
     const move_result = try json.stringify(allocator, after_move);
@@ -130,7 +130,7 @@ pub fn main() !void {
         },
     };
 
-    var after_copy = try json.applyPatch(allocator, copy_doc.root, &copy_ops);
+    const after_copy = try json.applyPatch(allocator, copy_doc.root, &copy_ops);
     defer json.freePatchValue(allocator, after_copy);
 
     const copy_result = try json.stringify(allocator, after_copy);
@@ -195,7 +195,7 @@ pub fn main() !void {
         },
     };
 
-    var after_arr_add = try json.applyPatch(allocator, array_doc.root, &arr_add_ops);
+    const after_arr_add = try json.applyPatch(allocator, array_doc.root, &arr_add_ops);
     defer json.freePatchValue(allocator, after_arr_add);
 
     const arr_add_result = try json.stringify(allocator, after_arr_add);
@@ -211,7 +211,7 @@ pub fn main() !void {
         },
     };
 
-    var after_arr_append = try json.applyPatch(allocator, array_doc.root, &arr_append_ops);
+    const after_arr_append = try json.applyPatch(allocator, array_doc.root, &arr_append_ops);
     defer json.freePatchValue(allocator, after_arr_append);
 
     const arr_append_result = try json.stringify(allocator, after_arr_append);
@@ -252,7 +252,7 @@ pub fn main() !void {
         },
     };
 
-    var after_chain = try json.applyPatch(allocator, chain_doc.root, &chain_ops);
+    const after_chain = try json.applyPatch(allocator, chain_doc.root, &chain_ops);
     defer json.freePatchValue(allocator, after_chain);
 
     const chain_result = try json.stringify(allocator, after_chain);
@@ -273,7 +273,7 @@ pub fn main() !void {
     var patch_doc = try json.parse(allocator, patch_json, .{}, &err);
     defer patch_doc.deinit();
 
-    var parsed_ops = try json.parsePatch(allocator, patch_doc.root);
+    const parsed_ops = try json.parsePatch(allocator, patch_doc.root);
     defer allocator.free(parsed_ops);
 
     std.debug.print("  Parsed {d} operations from JSON\n", .{parsed_ops.len});
@@ -282,7 +282,7 @@ pub fn main() !void {
     }
 
     // Apply the parsed patch
-    var after_parsed = try json.applyPatch(allocator, original.root, parsed_ops);
+    const after_parsed = try json.applyPatch(allocator, original.root, parsed_ops);
     defer json.freePatchValue(allocator, after_parsed);
 
     const parsed_result = try json.stringify(allocator, after_parsed);

@@ -15,6 +15,14 @@ const std = @import("std");
 const json = @import("json.zig");
 const unicode = @import("unicode.zig");
 const number_mod = @import("number.zig");
+const simd = @import("simd.zig");
+
+/// Below this member count an object dedups duplicate keys with a linear scan
+/// over already-collected members instead of building a per-object hash map.
+/// Linear scan avoids a hash-map allocation that would persist for the whole
+/// document lifetime in the parse arena (arena deinit reclaims it only at the
+/// end). See PERF-0003.
+const LINEAR_DEDUP_THRESHOLD: usize = 32;
 
 const ErrorCode = json.ErrorCode;
 const ParseError = json.ParseError;
@@ -79,9 +87,38 @@ const Parser = struct {
         }
     }
 
+    /// Skip a run of plain JSON whitespace (space/tab/CR/LF) starting at the
+    /// current position using the SIMD scanner, updating line/col to match a
+    /// byte-at-a-time advance(). Returns true if at least one byte was skipped.
+    /// Leaves self.pos at the first non-whitespace byte. (PERF-0001)
+    fn skipPlainWhitespaceSIMD(self: *Parser) bool {
+        const start = self.pos;
+        const rel = simd.skipWhitespaceSIMD(self.input[start..]);
+        if (rel == 0) return false;
+        const end = start + rel;
+        // Update line/col exactly as advance() would over the skipped span.
+        var i = start;
+        while (i < end) : (i += 1) {
+            if (self.input[i] == '\n') {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+        }
+        self.pos = end;
+        return true;
+    }
+
     fn skipWhitespace(self: *Parser) void {
-        while (self.peek()) |c| {
+        while (true) {
+            // Fast path: vectorized skip of a plain-whitespace run.
+            _ = self.skipPlainWhitespaceSIMD();
+            const c = self.peek() orelse return;
             if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+                // skipPlainWhitespaceSIMD already consumed all of these; reaching
+                // here only with leftover whitespace is impossible, but advance
+                // defensively to guarantee forward progress.
                 self.advance();
             } else if (self.opts.json5 and c == '/') {
                 // JSON5: Handle comments
@@ -359,6 +396,51 @@ const Parser = struct {
         return .{ .str = str };
     }
 
+    /// Validate the span self.input[self.pos .. end] as JSON string content:
+    /// reject unescaped control bytes (< 0x20) and invalid UTF-8 sequences,
+    /// matching the byte-at-a-time semantics of the original parser. On success
+    /// advances self.pos/line/col over the whole span and returns. On failure
+    /// advances to the offending byte, sets the error, and returns error.JsonParse.
+    /// `end` must be the position of a `"` or `\\` (i.e. neither appears inside).
+    fn validateStringSpan(self: *Parser, end: usize) ParseValueError!void {
+        while (self.pos < end) {
+            const c = self.input[self.pos];
+            if (c < 0x20) {
+                self.setError(.InvalidString);
+                return error.JsonParse;
+            }
+            // PERF-0011: ASCII fast-skip. For a byte in [0x20, 0x7F] (`c < 0x80`),
+            // utf8SeqLen is always 1 and isValidUtf8Seq of the single byte always
+            // succeeds, so col advances by exactly 1 — identical to the general
+            // path below. Skipping the per-byte utf8SeqLen/isValidUtf8Seq calls is
+            // behavior-preserving and only the multibyte case (c >= 0x80) falls
+            // through to full UTF-8 validation (mirrors the tokenizer's c>=0x80
+            // gate). Same accept/reject set, same col, same error positions.
+            if (c < 0x80) {
+                self.col += 1;
+                self.pos += 1;
+                continue;
+            }
+            const seq_len = unicode.utf8SeqLen(c) catch {
+                self.setError(.InvalidUtf8);
+                return error.JsonParse;
+            };
+            if (self.pos + seq_len > self.input.len) {
+                self.setError(.InvalidUtf8);
+                return error.JsonParse;
+            }
+            const seq = self.input[self.pos..][0..seq_len];
+            if (!unicode.isValidUtf8Seq(seq)) {
+                self.setError(.InvalidUtf8);
+                return error.JsonParse;
+            }
+            // No newlines possible inside a JSON string span (control chars are
+            // rejected above, and \n < 0x20), so col advances by the codepoint.
+            self.col += 1;
+            self.pos += seq_len;
+        }
+    }
+
     fn parseStringRaw(self: *Parser) ![]const u8 {
         if (self.peek() != '"') {
             self.setError(.UnexpectedToken);
@@ -366,40 +448,63 @@ const Parser = struct {
         }
         self.advance();
 
+        const body_start = self.pos;
+
+        // Fast path: scan for the closing quote / first escape with SIMD.
+        // If the whole body has no escapes, return a single dupe of the span.
+        // (PERF-0001 string scan, PERF-0002 no-escape fast path.)
+        const first = simd.scanStringSIMD(self.input[self.pos..]);
+        const first_rel = first.pos orelse {
+            // No quote or backslash before end of input → unterminated. Validate
+            // what we have so the error position/code matches the byte path
+            // (control/UTF-8 errors take precedence over EOF).
+            try self.validateStringSpan(self.input.len);
+            self.setError(.UnexpectedEof);
+            return error.JsonParse;
+        };
+        const first_abs = self.pos + first_rel;
+
+        if (!first.is_escape) {
+            // Closing quote with no escapes anywhere in the body.
+            try self.validateStringSpan(first_abs); // advances pos to the quote
+            // self.pos now == first_abs, pointing at the closing '"'.
+            self.advance(); // consume '"'
+            return try self.alloc().dupe(u8, self.input[body_start..first_abs]);
+        }
+
+        // Slow path: at least one escape present. Build incrementally, but
+        // reserve up front to avoid realloc churn. (PERF-0002 slow-path reserve.)
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(self.alloc());
+        // The decoded string is at most the remaining raw byte count; reserving
+        // the distance to the first escape covers the common case in one alloc.
+        try result.ensureTotalCapacity(self.alloc(), self.input.len - body_start);
+
+        // Append the clean prefix before the first escape (validated), then fall
+        // into the unified scan loop below starting at the escape.
+        try self.validateStringSpan(first_abs);
+        try result.appendSlice(self.alloc(), self.input[body_start..first_abs]);
 
         while (self.peek()) |c| {
-            if (c == '"') {
-                self.advance();
-                return result.toOwnedSlice(self.alloc());
-            }
-
-            if (c < 0x20) {
-                self.setError(.InvalidString);
-                return error.JsonParse;
-            }
-
             if (c == '\\') {
                 self.advance();
                 const escaped = try self.parseEscape();
                 try result.appendSlice(self.alloc(), escaped);
+            } else if (c == '"') {
+                self.advance();
+                return try result.toOwnedSlice(self.alloc());
             } else {
-                const seq_len = unicode.utf8SeqLen(c) catch {
-                    self.setError(.InvalidUtf8);
+                // Scan the next clean run up to the following quote/escape.
+                const scan = simd.scanStringSIMD(self.input[self.pos..]);
+                const rel = scan.pos orelse {
+                    try self.validateStringSpan(self.input.len);
+                    self.setError(.UnexpectedEof);
                     return error.JsonParse;
                 };
-                if (self.pos + seq_len > self.input.len) {
-                    self.setError(.InvalidUtf8);
-                    return error.JsonParse;
-                }
-                const seq = self.input[self.pos..][0..seq_len];
-                if (!unicode.isValidUtf8Seq(seq)) {
-                    self.setError(.InvalidUtf8);
-                    return error.JsonParse;
-                }
-                try result.appendSlice(self.alloc(), seq);
-                for (0..seq_len) |_| self.advance();
+                const abs = self.pos + rel;
+                const run_start = self.pos;
+                try self.validateStringSpan(abs); // validates + advances to abs
+                try result.appendSlice(self.alloc(), self.input[run_start..abs]);
             }
         }
 
@@ -497,10 +602,37 @@ const Parser = struct {
         const start = self.pos;
 
         // Optional sign (JSON5 allows +)
+        var negative = false;
         if (self.peek() == '-') {
             self.advance();
+            negative = true;
         } else if (self.opts.json5 and self.peek() == '+') {
             self.advance();
+        }
+
+        // JSON5: signed Infinity literal (GAP-0009). JSON5 §7 numbers are
+        // `[+-]?(Infinity|NaN|...)`, so a leading sign may precede `Infinity`.
+        // `Infinity`/`NaN` without a sign are handled in parseJson5Literal via
+        // the `I`/`N` dispatch; this branch covers `-Infinity` / `+Infinity`,
+        // which route through parseNumber because the sign is consumed here.
+        // Strict JSON never reaches here with an `I` because parseValue only
+        // dispatches `-`/`+` to parseNumber and a non-digit `I` then falls
+        // through to error.InvalidNumber below — preserving strict rejection.
+        if (self.opts.json5 and self.pos + 8 <= self.input.len and
+            std.mem.eql(u8, self.input[self.pos..][0..8], "Infinity"))
+        {
+            self.pos += 8;
+            self.col += 8;
+            // Canonical signed-infinity Number: sign reflects the leading sign,
+            // digits is the "Infinity" sentinel mantissa (mirrors cbor.zig
+            // floatToNormalizedValue and the unsigned `Infinity` literal).
+            const lexeme = try self.alloc().dupe(u8, self.input[start..self.pos]);
+            return .{ .num = .{
+                .lexeme = lexeme,
+                .sign = if (negative) -1 else 1,
+                .digits = "Infinity",
+                .exp10 = 0,
+            } };
         }
 
         // JSON5: Check for hex number 0x or 0X
@@ -720,8 +852,14 @@ const Parser = struct {
         var members: std.ArrayList(Member) = .empty;
         errdefer members.deinit(self.alloc());
 
-        var keys = std.StringHashMap(void).init(self.alloc());
-        defer keys.deinit();
+        // Duplicate-key detection (PERF-0003): for small objects we scan the
+        // already-collected members linearly (no allocation). Only once an
+        // object grows past LINEAR_DEDUP_THRESHOLD do we build a hash map for
+        // O(1) lookups. The map is only ever constructed when unique_keys is on
+        // and the object is large, so the common case (small objects, default
+        // options) allocates no per-object dedup table in the arena.
+        var keys: ?std.StringHashMap(void) = null;
+        defer if (keys) |*k| k.deinit();
 
         self.skipWhitespace();
 
@@ -752,11 +890,31 @@ const Parser = struct {
             };
 
             if (self.opts.unique_keys) {
-                if (keys.contains(key)) {
-                    self.setError(.DuplicateKey);
-                    return error.JsonParse;
+                if (keys) |*k| {
+                    // Large object: use the hash map.
+                    if (k.contains(key)) {
+                        self.setError(.DuplicateKey);
+                        return error.JsonParse;
+                    }
+                    try k.put(key, {});
+                } else {
+                    // Small object: linear scan over already-collected keys.
+                    for (members.items) |m| {
+                        if (std.mem.eql(u8, m.k, key)) {
+                            self.setError(.DuplicateKey);
+                            return error.JsonParse;
+                        }
+                    }
+                    // Promote to a hash map once we exceed the small-object size,
+                    // seeding it with all keys collected so far.
+                    if (members.items.len >= LINEAR_DEDUP_THRESHOLD) {
+                        var map = std.StringHashMap(void).init(self.alloc());
+                        try map.ensureTotalCapacity(@intCast(members.items.len + 1));
+                        for (members.items) |m| map.putAssumeCapacity(m.k, {});
+                        try map.put(key, {});
+                        keys = map;
+                    }
                 }
-                try keys.put(key, {});
             }
 
             self.skipWhitespace();
@@ -827,6 +985,16 @@ const Parser = struct {
     }
 };
 
+/// Parse `input` into a `Document`.
+///
+/// The returned `Document` owns an arena holding the entire value tree; the
+/// caller must call `Document.deinit()` to free it. On failure, `err` is
+/// populated with the error `code`, line, column, and byte offset of the first
+/// problem (so `err` is an out-parameter even on the error path).
+///
+/// Errors: `error.JsonLimit` when a configured limit in `opts` is exceeded
+/// (size, depth, node count); `error.OutOfMemory` on allocation failure; and
+/// the tokenizer/parse error set for malformed input.
 pub fn parse(a: std.mem.Allocator, input: []const u8, opts: ParseOptions, err: *ParseError) !Document {
     if (input.len > opts.max_bytes) {
         err.* = .{ .code = .ByteLimit, .line = 1, .col = 1, .offset = 0 };
@@ -948,6 +1116,172 @@ test "reject lone low surrogate" {
 }
 
 // ============================================================================
+// Hot-path correctness tests (PERF-0001/0002/0003 guards)
+// ============================================================================
+
+test "parse empty string" {
+    var err = ParseError.init();
+    var doc = try parse(std.testing.allocator, "\"\"", .{}, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("", doc.root.str);
+}
+
+test "parse long string with no escapes (SIMD span > vector width)" {
+    var err = ParseError.init();
+    // 100 'a' bytes — well past the 16-byte SIMD vector width, no escapes.
+    const input = "\"" ++ ("a" ** 100) ++ "\"";
+    var doc = try parse(std.testing.allocator, input, .{}, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("a" ** 100, doc.root.str);
+}
+
+test "parse long string with escape after a long unescaped run" {
+    var err = ParseError.init();
+    // 40 unescaped bytes, then \n, then more bytes — forces fast-scan then escape fallback.
+    const input = "\"" ++ ("x" ** 40) ++ "\\n" ++ ("y" ** 40) ++ "\"";
+    var doc = try parse(std.testing.allocator, input, .{}, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings(("x" ** 40) ++ "\n" ++ ("y" ** 40), doc.root.str);
+}
+
+test "parse string with all simple escapes" {
+    var err = ParseError.init();
+    var doc = try parse(std.testing.allocator, "\"a\\\"b\\\\c\\/d\\b\\f\\n\\r\\te\"", .{}, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("a\"b\\c/d\x08\x0C\n\r\te", doc.root.str);
+}
+
+test "parse string with multibyte utf8 (no escapes)" {
+    var err = ParseError.init();
+    // Japanese + emoji, raw UTF-8 bytes, no escapes — must pass through byte-exact.
+    var doc = try parse(std.testing.allocator, "\"\xE6\x97\xA5\xE6\x9C\xAC\xF0\x9F\x98\x80\"", .{}, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("\xE6\x97\xA5\xE6\x9C\xAC\xF0\x9F\x98\x80", doc.root.str);
+}
+
+test "parse string with multibyte utf8 spanning vector boundary" {
+    var err = ParseError.init();
+    // 15 ASCII bytes (so a 3-byte char straddles the 16-byte SIMD chunk), then a 3-byte char.
+    const input = "\"" ++ ("a" ** 15) ++ "\xE6\x97\xA5" ++ ("b" ** 20) ++ "\"";
+    var doc = try parse(std.testing.allocator, input, .{}, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings(("a" ** 15) ++ "\xE6\x97\xA5" ++ ("b" ** 20), doc.root.str);
+}
+
+test "reject invalid utf8 in string (lone continuation)" {
+    var err = ParseError.init();
+    const result = parse(std.testing.allocator, "\"a\x80b\"", .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(ErrorCode.InvalidUtf8, err.code);
+}
+
+test "reject invalid utf8 in string (overlong)" {
+    var err = ParseError.init();
+    const result = parse(std.testing.allocator, "\"\xC0\x80\"", .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+}
+
+test "reject invalid utf8 in string (truncated multibyte at end)" {
+    var err = ParseError.init();
+    const result = parse(std.testing.allocator, "\"abc\xE6\x97\"", .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+}
+
+test "reject unescaped control char in string (co-located)" {
+    var err = ParseError.init();
+    const result = parse(std.testing.allocator, "\"a\tb\"", .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(ErrorCode.InvalidString, err.code);
+}
+
+test "reject unescaped control char after long run" {
+    var err = ParseError.init();
+    // Control byte appears after a >16-byte unescaped run, in the SIMD scan region.
+    const input = "\"" ++ ("a" ** 30) ++ "\x01b\"";
+    const result = parse(std.testing.allocator, input, .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(ErrorCode.InvalidString, err.code);
+}
+
+test "reject unterminated string" {
+    var err = ParseError.init();
+    const result = parse(std.testing.allocator, "\"abc", .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(ErrorCode.UnexpectedEof, err.code);
+}
+
+test "string line/col tracking with embedded escaped newline" {
+    var err = ParseError.init();
+    // After a string containing \n escape, trailing garbage error reports correct position.
+    const result = parse(std.testing.allocator, "\"a\\nb\" x", .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(ErrorCode.TrailingGarbage, err.code);
+}
+
+test "whitespace skipping across vector boundary" {
+    var err = ParseError.init();
+    // >16 bytes of mixed whitespace before the value exercises the SIMD ws skip.
+    const input = (" \t\n\r" ** 8) ++ "true";
+    var doc = try parse(std.testing.allocator, input, .{}, &err);
+    defer doc.deinit();
+    try std.testing.expect(doc.root.bool == true);
+}
+
+test "small object duplicate key rejected" {
+    var err = ParseError.init();
+    const result = parse(std.testing.allocator, "{\"a\":1,\"b\":2,\"a\":3}", .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(ErrorCode.DuplicateKey, err.code);
+}
+
+test "large object (above linear-dedup threshold) accepts unique keys" {
+    var err = ParseError.init();
+    // 50 unique keys — above the small-object linear-scan threshold, exercises map path.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try buf.append(std.testing.allocator, '{');
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        if (i != 0) try buf.append(std.testing.allocator, ',');
+        const frag = try std.fmt.allocPrint(std.testing.allocator, "\"k{d}\":{d}", .{ i, i });
+        defer std.testing.allocator.free(frag);
+        try buf.appendSlice(std.testing.allocator, frag);
+    }
+    try buf.append(std.testing.allocator, '}');
+    var doc = try parse(std.testing.allocator, buf.items, .{}, &err);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, 50), doc.root.obj.len);
+    try std.testing.expectEqualStrings("k0", doc.root.obj[0].k);
+    try std.testing.expectEqualStrings("k49", doc.root.obj[49].k);
+}
+
+test "large object duplicate key (above threshold) rejected" {
+    var err = ParseError.init();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try buf.append(std.testing.allocator, '{');
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        if (i != 0) try buf.append(std.testing.allocator, ',');
+        const frag = try std.fmt.allocPrint(std.testing.allocator, "\"k{d}\":{d}", .{ i, i });
+        defer std.testing.allocator.free(frag);
+        try buf.appendSlice(std.testing.allocator, frag);
+    }
+    // Duplicate the very first key after 40 unique ones.
+    try buf.appendSlice(std.testing.allocator, ",\"k0\":99}");
+    const result = parse(std.testing.allocator, buf.items, .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(ErrorCode.DuplicateKey, err.code);
+}
+
+test "object with unique_keys=false allows duplicates" {
+    var err = ParseError.init();
+    var doc = try parse(std.testing.allocator, "{\"a\":1,\"a\":2}", .{ .unique_keys = false }, &err);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, 2), doc.root.obj.len);
+}
+
+// ============================================================================
 // JSON5 Tests
 // ============================================================================
 
@@ -1035,4 +1369,163 @@ test "json5: NaN" {
     var doc = try parse(std.testing.allocator, "NaN", .{ .json5 = true }, &err);
     defer doc.deinit();
     try std.testing.expectEqualStrings("NaN", doc.root.num.lexeme);
+}
+
+test "json5: -Infinity parses to negative infinity (GAP-0009)" {
+    var err = ParseError.init();
+    var doc = try parse(std.testing.allocator, "-Infinity", .{ .json5 = true }, &err);
+    defer doc.deinit();
+    // Canonical negative-infinity Number shape: lexeme "-Infinity", sign -1,
+    // digits "Infinity" (matches cbor.zig floatToNormalizedValue).
+    try std.testing.expectEqualStrings("-Infinity", doc.root.num.lexeme);
+    try std.testing.expectEqual(@as(i8, -1), doc.root.num.sign);
+    try std.testing.expectEqualStrings("Infinity", doc.root.num.digits);
+}
+
+test "json5: +Infinity parses to positive infinity (GAP-0009)" {
+    var err = ParseError.init();
+    var doc = try parse(std.testing.allocator, "+Infinity", .{ .json5 = true }, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("+Infinity", doc.root.num.lexeme);
+    try std.testing.expectEqual(@as(i8, 1), doc.root.num.sign);
+    try std.testing.expectEqualStrings("Infinity", doc.root.num.digits);
+}
+
+test "strict JSON rejects -Infinity / Infinity / NaN (GAP-0009)" {
+    inline for (.{ "-Infinity", "Infinity", "NaN", "+Infinity", "-NaN" }) |lit| {
+        var err = ParseError.init();
+        const result = parse(std.testing.allocator, lit, .{}, &err);
+        try std.testing.expectError(error.JsonParse, result);
+    }
+}
+
+test "json5 still parses Infinity and NaN (GAP-0009 regression)" {
+    {
+        var err = ParseError.init();
+        var doc = try parse(std.testing.allocator, "Infinity", .{ .json5 = true }, &err);
+        defer doc.deinit();
+        try std.testing.expectEqualStrings("Infinity", doc.root.num.lexeme);
+        try std.testing.expectEqual(@as(i8, 1), doc.root.num.sign);
+    }
+    {
+        var err = ParseError.init();
+        var doc = try parse(std.testing.allocator, "NaN", .{ .json5 = true }, &err);
+        defer doc.deinit();
+        try std.testing.expectEqualStrings("NaN", doc.root.num.lexeme);
+    }
+}
+
+test "json5: -Infinity inside array/object (GAP-0009)" {
+    var err = ParseError.init();
+    var doc = try parse(std.testing.allocator, "{a: -Infinity, b: [Infinity, -Infinity]}", .{ .json5 = true }, &err);
+    defer doc.deinit();
+    const members = doc.root.obj;
+    try std.testing.expectEqualStrings("a", members[0].k);
+    try std.testing.expectEqualStrings("-Infinity", members[0].v.num.lexeme);
+    try std.testing.expectEqual(@as(i8, -1), members[0].v.num.sign);
+    const arr = members[1].v.arr;
+    try std.testing.expectEqualStrings("Infinity", arr[0].num.lexeme);
+    try std.testing.expectEqualStrings("-Infinity", arr[1].num.lexeme);
+}
+
+test "whitespace SIMD skip preserves line/col (PERF-0011 correctness)" {
+    var err = ParseError.init();
+    // >16 bytes of newline-bearing whitespace before invalid garbage: the error
+    // position must match a byte-at-a-time advance (line 6, after 5 newlines).
+    const input = "\n\n\n\n\n" ++ (" " ** 20) ++ "@";
+    const result = parse(std.testing.allocator, input, .{}, &err);
+    try std.testing.expectError(error.JsonParse, result);
+    try std.testing.expectEqual(@as(usize, 6), err.line);
+    try std.testing.expectEqual(@as(usize, 21), err.col);
+}
+
+// ============================================================================
+// Parse-throughput micro-bench (PERF-0001/0002/0003)
+//
+// Normally a no-op: the `RUN_PARSE_BENCH` compile-time flag is false, so the
+// bench test skips immediately and does not affect `zig build test` timing.
+// To measure locally, flip the flag to `true` and run a ReleaseFast test:
+//   zig test -OReleaseFast --dep ... src/json.zig   (or temporarily set it true
+//   and `zig build test` — Debug numbers are noisier but directional).
+// ============================================================================
+
+const RUN_PARSE_BENCH = false;
+
+fn monoNanos() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+fn benchCorpus(a: std.mem.Allocator, comptime label: []const u8, input: []const u8, iters: usize) !void {
+    // Warmup + correctness sanity (the bench input must actually parse).
+    {
+        var err = ParseError.init();
+        var doc = try parse(a, input, .{}, &err);
+        doc.deinit();
+    }
+    const t0 = monoNanos();
+    var i: usize = 0;
+    while (i < iters) : (i += 1) {
+        var err = ParseError.init();
+        var doc = parse(a, input, .{}, &err) catch unreachable;
+        doc.deinit();
+    }
+    const ns = monoNanos() - t0;
+    const total_bytes = input.len * iters;
+    const mbps = (@as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0)) /
+        (@as(f64, @floatFromInt(ns)) / 1_000_000_000.0);
+    std.debug.print(
+        "  parse-throughput[{s}]: {d} iters, {d} bytes/iter, {d:.2} ms, {d:.1} MB/s\n",
+        .{ label, iters, input.len, @as(f64, @floatFromInt(ns)) / 1_000_000.0, mbps },
+    );
+}
+
+test "parse-throughput micro-bench (flag-gated)" {
+    if (!RUN_PARSE_BENCH) return error.SkipZigTest;
+    const a = std.testing.allocator;
+
+    // 1) Whitespace-heavy: lots of inter-token whitespace (scan-bound).
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(a);
+        try buf.append(a, '[');
+        var i: usize = 0;
+        while (i < 2000) : (i += 1) {
+            if (i != 0) try buf.appendSlice(a, ",");
+            try buf.appendSlice(a, "        \n\t  1");
+        }
+        try buf.append(a, ']');
+        try benchCorpus(a, "whitespace", buf.items, 2000);
+    }
+
+    // 2) Long-string-heavy: array of 64-byte unescaped strings (string-scan-bound).
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(a);
+        try buf.append(a, '[');
+        var i: usize = 0;
+        while (i < 2000) : (i += 1) {
+            if (i != 0) try buf.append(a, ',');
+            try buf.append(a, '"');
+            try buf.appendSlice(a, "abcdefghABCDEFGH0123456789abcdefghABCDEFGH0123456789abcdefgh01234");
+            try buf.append(a, '"');
+        }
+        try buf.append(a, ']');
+        try benchCorpus(a, "long-strings", buf.items, 2000);
+    }
+
+    // 3) Small-object-heavy: array of small objects (object-dedup-bound).
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(a);
+        try buf.append(a, '[');
+        var i: usize = 0;
+        while (i < 2000) : (i += 1) {
+            if (i != 0) try buf.append(a, ',');
+            try buf.appendSlice(a, "{\"id\":1,\"name\":\"abc\",\"ok\":true,\"v\":3.14}");
+        }
+        try buf.append(a, ']');
+        try benchCorpus(a, "small-objects", buf.items, 2000);
+    }
 }

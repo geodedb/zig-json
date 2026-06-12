@@ -9,7 +9,7 @@ const std = @import("std");
 const json = @import("json");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -23,22 +23,17 @@ pub fn main() !void {
     ;
 
     // Create a tokenizer
-    var tokenizer = json.Tokenizer.init(sample_json, .{});
+    var tokenizer = json.Tokenizer.init(allocator, sample_json, .{});
 
     std.debug.print("  Tokens in document:\n", .{});
     while (true) {
         const token = tokenizer.next() catch break;
-        if (token.token_type == .eof) break;
+        if (token.type == .eof) break;
 
-        std.debug.print("    Type: {}, Value: ", .{token.token_type});
-        if (token.value) |val| {
-            switch (token.token_type) {
-                .string => std.debug.print("\"{s}\"", .{val}),
-                .number => std.debug.print("{s}", .{val}),
-                else => std.debug.print("{s}", .{val}),
-            }
-        } else {
-            std.debug.print("(none)", .{});
+        std.debug.print("    Type: {}, Value: ", .{token.type});
+        switch (token.type) {
+            .string => std.debug.print("\"{s}\"", .{token.bytes}),
+            else => std.debug.print("{s}", .{token.bytes}),
         }
         std.debug.print("\n", .{});
     }
@@ -48,11 +43,11 @@ pub fn main() !void {
     // =========================================================================
     std.debug.print("\n=== 2. Read Values from Tokenizer ===\n", .{});
 
-    var tokenizer2 = json.Tokenizer.init(sample_json, .{});
+    var tokenizer2 = json.Tokenizer.init(allocator, sample_json, .{});
 
     // Read the entire value as a json.Value tree
-    var value = try json.readValue(&tokenizer2, allocator);
-    defer json.freeValue(allocator, &value);
+    const value = try json.readValue(&tokenizer2);
+    defer json.freeValue(allocator, value);
 
     std.debug.print("  Read complete value: ", .{});
     switch (value) {
@@ -66,35 +61,35 @@ pub fn main() !void {
     // =========================================================================
     std.debug.print("\n=== 3. Streaming Encoder ===\n", .{});
 
-    // Create a buffer to write to
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(allocator);
+    // Create an allocating writer to collect the streamed output
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
 
     // Create a streaming encoder with pretty printing
-    var encoder = json.streamingEncoder(allocator, buffer.writer(allocator), .{
+    var encoder = json.streamingEncoder(allocator, &buffer.writer, .{
         .indent = "  ",
-        .sort_keys = false,
     });
+    defer encoder.deinit();
 
     // Write JSON incrementally
     try encoder.beginObject();
 
-    try encoder.writeObjectKey("name");
+    try encoder.writeKey("name");
     try encoder.writeString("Bob");
 
-    try encoder.writeObjectKey("scores");
+    try encoder.writeKey("scores");
     try encoder.beginArray();
-    try encoder.writeNumber(95);
-    try encoder.writeNumber(87);
-    try encoder.writeNumber(92);
+    try encoder.writeInt(@as(u32, 95));
+    try encoder.writeInt(@as(u32, 87));
+    try encoder.writeInt(@as(u32, 92));
     try encoder.endArray();
 
-    try encoder.writeObjectKey("active");
+    try encoder.writeKey("active");
     try encoder.writeBool(true);
 
     try encoder.endObject();
 
-    std.debug.print("  Streamed output:\n{s}\n", .{buffer.items});
+    std.debug.print("  Streamed output:\n{s}\n", .{buffer.written()});
 
     // =========================================================================
     // 4. Encode to writer directly
@@ -113,13 +108,13 @@ pub fn main() !void {
         .email = "charlie@example.com",
     };
 
-    var output: std.ArrayListUnmanaged(u8) = .empty;
-    defer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
 
     // Write directly to the output buffer
-    try json.encodeToWriter(output.writer(allocator), user, .{ .indent = "  " });
+    try json.encodeToWriter(&output.writer, user, .{ .indent = "  " });
 
-    std.debug.print("  Encoded to writer:\n{s}\n", .{output.items});
+    std.debug.print("  Encoded to writer:\n{s}\n", .{output.written()});
 
     // =========================================================================
     // 5. Process large arrays item by item
@@ -134,26 +129,25 @@ pub fn main() !void {
         \\]
     ;
 
-    var arr_tokenizer = json.Tokenizer.init(large_array, .{});
+    var arr_tokenizer = json.Tokenizer.init(allocator, large_array, .{});
 
     // Skip the opening bracket
-    var first_token = try arr_tokenizer.next();
-    std.debug.print("  First token: {} (expecting array_start)\n", .{first_token.token_type});
+    const first_token = try arr_tokenizer.next();
+    std.debug.print("  First token: {} (expecting array_start)\n", .{first_token.type});
 
     // Process each item without loading the entire array
     var count: usize = 0;
     while (true) {
         // Check if we've reached the end
-        if (arr_tokenizer.peek()) |peeked| {
-            if (peeked == ']') {
-                _ = try arr_tokenizer.next(); // consume the ]
-                break;
-            }
-        } else break;
+        const peeked = try arr_tokenizer.peek();
+        if (peeked.type == .array_end) {
+            _ = try arr_tokenizer.next(); // consume the ]
+            break;
+        }
 
         // Read the next value
-        var item = try json.readValue(&arr_tokenizer, allocator);
-        defer json.freeValue(allocator, &item);
+        const item = try json.readValue(&arr_tokenizer);
+        defer json.freeValue(allocator, item);
 
         count += 1;
 
@@ -167,10 +161,9 @@ pub fn main() !void {
         }
 
         // Skip comma if present
-        if (arr_tokenizer.peek()) |p| {
-            if (p == ',') {
-                _ = try arr_tokenizer.next();
-            }
+        const p = try arr_tokenizer.peek();
+        if (p.type == .comma) {
+            _ = try arr_tokenizer.next();
         }
     }
     std.debug.print("  Processed {d} items\n", .{count});
@@ -183,10 +176,11 @@ pub fn main() !void {
     // For very large data, you can encode directly to a file or network socket
     // Here we demonstrate with a buffer
 
-    var large_output: std.ArrayListUnmanaged(u8) = .empty;
-    defer large_output.deinit(allocator);
+    var large_output: std.Io.Writer.Allocating = .init(allocator);
+    defer large_output.deinit();
 
-    var large_encoder = json.streamingEncoder(allocator, large_output.writer(allocator), .{});
+    var large_encoder = json.streamingEncoder(allocator, &large_output.writer, .{});
+    defer large_encoder.deinit();
 
     try large_encoder.beginArray();
 
@@ -195,18 +189,18 @@ pub fn main() !void {
     while (i < 5) : (i += 1) {
         try large_encoder.beginObject();
 
-        try large_encoder.writeObjectKey("index");
-        try large_encoder.writeNumber(i);
+        try large_encoder.writeKey("index");
+        try large_encoder.writeInt(i);
 
-        try large_encoder.writeObjectKey("squared");
-        try large_encoder.writeNumber(i * i);
+        try large_encoder.writeKey("squared");
+        try large_encoder.writeInt(i * i);
 
         try large_encoder.endObject();
     }
 
     try large_encoder.endArray();
 
-    std.debug.print("  Generated array: {s}\n", .{large_output.items});
+    std.debug.print("  Generated array: {s}\n", .{large_output.written()});
 
     std.debug.print("\nAll examples completed successfully!\n", .{});
 }

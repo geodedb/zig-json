@@ -422,6 +422,19 @@ pub const ValidationError = struct {
 pub const ValidationReport = struct {
     ok: bool,
     errors: []ValidationError,
+
+    /// Free the report's owned memory (each error's slices and the errors
+    /// array). Allocator must be the one passed to `validate`.
+    pub fn deinit(self: *ValidationReport, allocator: std.mem.Allocator) void {
+        for (self.errors) |e| {
+            allocator.free(e.instance_ptr);
+            allocator.free(e.schema_ptr);
+            allocator.free(e.keyword);
+            allocator.free(e.message);
+        }
+        allocator.free(self.errors);
+        self.errors = &.{};
+    }
 };
 
 /// Validate a value against a compiled schema

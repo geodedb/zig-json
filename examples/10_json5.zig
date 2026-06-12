@@ -9,7 +9,7 @@ const std = @import("std");
 const json = @import("json");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -153,6 +153,10 @@ pub fn main() !void {
     // =========================================================================
     std.debug.print("\n=== 7. Special Number Values ===\n", .{});
 
+    // The parser accepts `Infinity`, `-Infinity`, `NaN`, a leading `+`, and
+    // leading/trailing decimal points. `-Infinity` is a first-class JSON5 number
+    // (JSON5 §7 number grammar is `[+-]?(Infinity|NaN|...)`); the parser now
+    // accepts it (GAP-0009), so it is demonstrated here.
     const special_json =
         \\{
         \\  infinity: Infinity,
@@ -247,8 +251,9 @@ pub fn main() !void {
     ;
 
     const strict_result = json.parse(allocator, json5_only, .{}, &err);
-    if (strict_result) |*d| {
-        d.deinit();
+    if (strict_result) |d| {
+        var doc = d;
+        doc.deinit();
         std.debug.print("  JSON5 syntax unexpectedly parsed in strict mode\n", .{});
     } else |_| {
         std.debug.print("  JSON5 syntax rejected in strict mode: expected\n", .{});

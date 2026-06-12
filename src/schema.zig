@@ -1273,7 +1273,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         }
 
         if (node.pattern) |pat| {
-            const matches = pat.match(ctx.allocator, str, ctx.opts.regex_max_steps) catch false;
+            const matches = pat.match(str, ctx.opts.regex_max_steps) catch false;
             if (!matches) {
                 try ctx.addError(inst_ptr, node.location, "pattern", "does not match pattern");
             }
@@ -1413,7 +1413,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
         if (node.pattern_properties) |patterns| {
             for (obj) |m| {
                 for (patterns) |pp| {
-                    const matches = pp.pattern.match(ctx.allocator, m.k, ctx.opts.regex_max_steps) catch false;
+                    const matches = pp.pattern.match(m.k, ctx.opts.regex_max_steps) catch false;
                     if (matches) {
                         const prop_ptr = try ctx.allocPtr(inst_ptr, m.k);
                         try validateNode(ctx, m.v, pp.schema, prop_ptr, depth, sdepth + 1);
@@ -1434,7 +1434,7 @@ fn validateNode(ctx: *ValidationContext, inst: Value, node: *const SchemaNode, i
 
                 if (!covered and node.pattern_properties != null) {
                     for (node.pattern_properties.?) |pp| {
-                        if (pp.pattern.match(ctx.allocator, m.k, ctx.opts.regex_max_steps) catch false) {
+                        if (pp.pattern.match(m.k, ctx.opts.regex_max_steps) catch false) {
                             covered = true;
                             break;
                         }
@@ -1731,14 +1731,18 @@ test "validate type string" {
     try std.testing.expect(!invalid_result.ok);
 }
 
-test "NQUAL-003: unsupported regex pattern reports SchemaInvalid via err" {
+test "NQUAL-003: invalid regex pattern reports SchemaInvalid via err" {
     const allocator = std.testing.allocator;
 
-    // "(a|b)" uses alternation, which the ECMA-262 subset rejects with
-    // error.UnsupportedPattern. The schema compiler must surface this through
-    // the `err` out-param as a SchemaInvalid parse error rather than leaking the
-    // raw regex error with `err` left uninitialized.
-    const schema_json = "{\"pattern\":\"(a|b)\"}";
+    // Alternation/grouping are now *supported* (the ECMA-262 engine is a Pike
+    // NFA), so this test uses a genuinely invalid pattern — an unbalanced group
+    // "(a" — to verify the schema compiler still surfaces a regex compile
+    // failure through the `err` out-param as a SchemaInvalid parse error rather
+    // than leaking the raw regex error with `err` left uninitialized. The
+    // positive case (alternation actually validates) is covered by
+    // "schema pattern alternation/grouping is supported" below and by the
+    // co-located tests in regex_ecma262.zig.
+    const schema_json = "{\"pattern\":\"(a\"}";
     var err = json.ParseError.init();
     var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
     defer schema_doc.deinit();
@@ -1746,6 +1750,40 @@ test "NQUAL-003: unsupported regex pattern reports SchemaInvalid via err" {
     const result = compile(allocator, &schema_doc, .{}, null, &err);
     try std.testing.expectError(error.JsonParse, result);
     try std.testing.expectEqual(json.ErrorCode.SchemaInvalid, err.code);
+}
+
+test "schema pattern alternation/grouping is supported" {
+    const allocator = std.testing.allocator;
+
+    const schema_json = "{\"pattern\":\"^(cat|dog)$\"}";
+    var err = json.ParseError.init();
+    var schema_doc = try json.parse(allocator, schema_json, .{}, &err);
+    defer schema_doc.deinit();
+
+    var compiled = try compile(allocator, &schema_doc, .{}, null, &err);
+    defer compiled.deinit();
+
+    const Case = struct { json: []const u8, ok: bool };
+    const cases = [_]Case{
+        .{ .json = "\"cat\"", .ok = true },
+        .{ .json = "\"dog\"", .ok = true },
+        .{ .json = "\"fish\"", .ok = false },
+    };
+    for (cases) |c| {
+        var d = try json.parse(allocator, c.json, .{}, &err);
+        defer d.deinit();
+        const r = try validate(allocator, &compiled, d.root, .{});
+        defer {
+            for (r.errors) |e| {
+                allocator.free(e.instance_ptr);
+                allocator.free(e.schema_ptr);
+                allocator.free(e.keyword);
+                allocator.free(e.message);
+            }
+            allocator.free(r.errors);
+        }
+        try std.testing.expectEqual(c.ok, r.ok);
+    }
 }
 
 test "validate minimum" {
