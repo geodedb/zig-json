@@ -276,7 +276,10 @@ fn fromValueInternal(comptime T: type, allocator: std.mem.Allocator, value: Valu
                 return std.meta.stringToEnum(T, value.str) orelse return error.InvalidFormat;
             } else if (value == .num) {
                 const int_val = numberToInt(std.meta.Tag(T), value.num) catch return error.IntegerOverflow;
-                return @enumFromInt(int_val);
+                // Checked conversion: rejects in-range-but-undefined values of
+                // exhaustive enums (NEW-002). For non-exhaustive enums every
+                // in-range integer is a valid tag, so fromInt returns it.
+                return std.enums.fromInt(T, int_val) orelse return error.InvalidFormat;
             }
             return error.TypeMismatch;
         },
@@ -494,7 +497,13 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                 const int_val = numberToInt(std.meta.Tag(T), value.num) catch {
                     return .{ .err = makePathError(allocator, path, .integer_overflow, "Enum integer overflow", @typeName(T), value.num.lexeme) };
                 };
-                return .{ .ok = @enumFromInt(int_val) };
+                // Checked conversion: rejects in-range-but-undefined values of
+                // exhaustive enums (NEW-002). Non-exhaustive enums accept any
+                // in-range integer.
+                const result = std.enums.fromInt(T, int_val) orelse {
+                    return .{ .err = makePathError(allocator, path, .invalid_format, "Invalid enum value", @typeName(T), value.num.lexeme) };
+                };
+                return .{ .ok = result };
             }
             return .{ .err = makePathError(allocator, path, .type_mismatch, "Type mismatch", "string or number", valueTypeName(value)) };
         },
@@ -2305,4 +2314,59 @@ test "ASR-011 depth bound: deeply nested caller-built unknown-capture tree is bo
 
     const result = fromValue(Config, allocator, value);
     try std.testing.expectError(error.JsonParse, result);
+}
+
+test "NEW-002: out-of-range number for exhaustive enum returns error (top level)" {
+    const Color = enum(u8) { red = 0, green = 1, blue = 2 };
+
+    // 200 fits in the u8 tag type but is not a valid tag -> must error, not abort.
+    try std.testing.expectError(
+        error.InvalidFormat,
+        unmarshal(Color, std.testing.allocator, "200"),
+    );
+}
+
+test "NEW-002: out-of-range number for exhaustive enum struct field returns error" {
+    const Color = enum(u8) { red = 0, green = 1, blue = 2 };
+    const Wrapper = struct { color: Color };
+
+    try std.testing.expectError(
+        error.InvalidFormat,
+        unmarshal(Wrapper, std.testing.allocator, "{\"color\": 200}"),
+    );
+}
+
+test "NEW-002: out-of-range number for exhaustive enum returns .err via WithInfo" {
+    const Color = enum(u8) { red = 0, green = 1, blue = 2 };
+
+    const result = unmarshalWithInfo(Color, std.testing.allocator, "200");
+    switch (result) {
+        .ok => try std.testing.expect(false), // Should be error, not abort
+        .err => |err| {
+            defer if (err.path.len > 0) std.testing.allocator.free(err.path);
+            try std.testing.expect(err.kind == .invalid_format);
+        },
+    }
+}
+
+test "NEW-002: valid numeric tag still succeeds" {
+    const Color = enum(u8) { red = 0, green = 1, blue = 2 };
+
+    const c = try unmarshal(Color, std.testing.allocator, "1");
+    try std.testing.expectEqual(Color.green, c);
+}
+
+test "NEW-002: valid string variant still succeeds" {
+    const Color = enum(u8) { red = 0, green = 1, blue = 2 };
+
+    const c = try unmarshal(Color, std.testing.allocator, "\"blue\"");
+    try std.testing.expectEqual(Color.blue, c);
+}
+
+test "NEW-002: non-exhaustive enum accepts in-range int" {
+    const Flags = enum(u8) { a = 0, _ };
+
+    // Any in-range integer is a valid value for a non-exhaustive enum.
+    const f = try unmarshal(Flags, std.testing.allocator, "5");
+    try std.testing.expectEqual(@as(Flags, @enumFromInt(5)), f);
 }
