@@ -678,6 +678,8 @@ const ValidationContext = struct {
         base_uri: []const u8,
 
         pub fn hash(self: RefCacheKey) u64 {
+            // fips-exempt: non-security — JSON-Schema $ref cache key hashing
+            // (ref + base_uri); hashmap lookup only, not a secret.
             var hasher = std.hash.Wyhash.init(0);
             hasher.update(self.ref);
             hasher.update(&[_]u8{0}); // separator
@@ -2331,4 +2333,9 @@ fn buildDeepXInstance(allocator: std.mem.Allocator, levels: usize) !Value {
         current = .{ .obj = members };
     }
     return current;
+}
+
+test "fips-exempt annotation present on schema ref-cache Wyhash site" {
+    const src = @embedFile("schema.zig");
+    try std.testing.expect(std.mem.indexOf(u8, src, "fips-exempt: non-security — JSON-Schema $ref cache key") != null);
 }
