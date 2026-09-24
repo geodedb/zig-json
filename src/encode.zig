@@ -571,6 +571,11 @@ pub const float_lexeme_buf_len = std.fmt.float.bufferSize(.decimal, f64);
 /// characters. "{d}" printed the invalid literal "(float)" for those, so they now
 /// use shortest round-trip scientific notation ("3.3621031431120935063e-4932"),
 /// which fits in std.fmt.float.min_buffer_size (53) bytes for every float type.
+///
+/// The input must be finite. NaN renders as `nan` and the infinities as `inf`
+/// and `-inf`, none of which is JSON, so callers classify NaN and Inf first
+/// and apply their own policy, as encodeFloat, toValueInternal and
+/// Encoder.writeFloat do (null, or the "NaN"/"Infinity" strings).
 pub fn renderFloatLexeme(buf: *[float_lexeme_buf_len]u8, value: anytype) []const u8 {
     return std.fmt.float.render(buf, value, .{ .mode = .decimal }) catch
         // Scientific mode without a precision cannot fail once the buffer holds
