@@ -22,3 +22,7 @@ Thumbs.db
 
 # Local package cache (stray)
 zig-pkg/
+
+# Official JSON-Schema-Test-Suite: fetched, not vendored, by
+# scripts/fetch-json-schema-test-suite.sh; never committed (SONNY-2426)
+/testdata/JSON-Schema-Test-Suite/
