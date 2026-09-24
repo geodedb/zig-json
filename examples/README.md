@@ -140,17 +140,19 @@ for (result.values) |title| {
 
 ```zig
 // Tokenizer for memory-efficient parsing
-var tokenizer = json.Tokenizer.init(input, .{});
+var tokenizer = json.Tokenizer.init(allocator, input, .{});
+defer tokenizer.deinit();
 while (true) {
     const token = tokenizer.next() catch break;
-    if (token.token_type == .eof) break;
+    if (token.type == .eof) break;
     // Process token...
 }
 
 // Streaming encoder
 var encoder = json.streamingEncoder(allocator, writer, .{});
+defer encoder.deinit();
 try encoder.beginObject();
-try encoder.writeObjectKey("name");
+try encoder.writeKey("name");
 try encoder.writeString("value");
 try encoder.endObject();
 ```

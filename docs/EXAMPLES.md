@@ -530,7 +530,8 @@ defer allocator.free(output);
 ```zig
 const input = "{\"name\": \"Alice\", \"values\": [1, 2, 3]}";
 
-var tokenizer = json.Tokenizer.init(input, .{});
+var tokenizer = json.Tokenizer.init(allocator, input, .{});
+defer tokenizer.deinit();
 
 while (true) {
     const token = tokenizer.next() catch |err| {
@@ -541,12 +542,12 @@ while (true) {
     if (token.type == .eof) break;
 
     switch (token.type) {
-        .object_begin => std.debug.print("Object start\n", .{}),
+        .object_start => std.debug.print("Object start\n", .{}),
         .object_end => std.debug.print("Object end\n", .{}),
-        .array_begin => std.debug.print("Array start\n", .{}),
+        .array_start => std.debug.print("Array start\n", .{}),
         .array_end => std.debug.print("Array end\n", .{}),
-        .string => std.debug.print("String: {s}\n", .{token.value.?}),
-        .number => std.debug.print("Number: {s}\n", .{token.value.?}),
+        .string => std.debug.print("String: {s}\n", .{token.bytes}),
+        .number => std.debug.print("Number: {s}\n", .{token.bytes}),
         else => {},
     }
 }

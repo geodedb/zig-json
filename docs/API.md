@@ -668,19 +668,23 @@ defer allocator.free(output);
 
 ### `Tokenizer`
 
-Low-level token-based parsing:
+Low-level token-based parsing. The tokenizer decodes strings into one buffer
+that it reuses across `next()`, `peek()` and `readValue()`; `deinit()` frees
+it, so pair every `init` with a `deinit`:
 
 ```zig
-var tokenizer = json.Tokenizer.init(input, .{});
+var tokenizer = json.Tokenizer.init(allocator, input, .{});
+defer tokenizer.deinit();
 
-while (tokenizer.next()) |token| {
+while (true) {
+    const token = try tokenizer.next();
+    if (token.type == .eof) break;
     switch (token.type) {
-        .object_begin => std.debug.print("{\n", .{}),
-        .string => std.debug.print("String: {s}\n", .{token.value.?}),
+        .object_start => std.debug.print("object start\n", .{}),
+        .string => std.debug.print("String: {s}\n", .{token.bytes}),
         // ...
+        else => {},
     }
-} else |err| {
-    // Handle error
 }
 ```
 
@@ -705,8 +709,10 @@ while (try tokenizer.next()) |token| {
 Read complete values from tokenizer:
 
 ```zig
-var tokenizer = json.Tokenizer.init(input, .{});
-const value = try json.readValue(allocator, &tokenizer);
+var tokenizer = json.Tokenizer.init(allocator, input, .{});
+defer tokenizer.deinit();
+
+const value = try json.readValue(&tokenizer);
 defer json.freeValue(allocator, value);
 ```
 
