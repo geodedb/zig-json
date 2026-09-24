@@ -1391,12 +1391,20 @@ fn freeInternal(comptime T: type, allocator: std.mem.Allocator, value: *T) void 
     switch (info) {
         .pointer => |ptr| {
             // SONNY-2443: a []const T or *const T field only promises that
-            // callers will not write through it. freeInternal frees memory that
-            // unmarshal itself allocated as mutable (allocator.alloc/create) and
-            // then filled in, so dropping the const to free what it points to is
-            // sound. Without the casts no struct with such a field could be
-            // unmarshaled at all: json.free and the ASR-011 cleanup instantiate
-            // this for every field.
+            // callers will not write through it. Where unmarshal allocated the
+            // memory (allocator.alloc/create, then filled it in), dropping the
+            // const to free it is sound, and without the casts no struct with
+            // such a field could be unmarshaled at all: json.free and the
+            // ASR-011 cleanup instantiate this for every field.
+            //
+            // Not every field json.free reaches was allocated by unmarshal,
+            // though. A field absent from the input keeps its struct default,
+            // which is static memory, and freeing it panics with "Invalid free":
+            // for example `[]const []const u8 = &.{ "a", "b" }`, the same
+            // pre-existing defect as a `[]const u8 = "dflt"` default. (The
+            // ASR-011 cleanup frees only the fields unmarshal populated, so it
+            // is unaffected.) Until that is fixed, decode such structs into an
+            // arena, or give their pointer fields only empty or null defaults.
             switch (ptr.size) {
                 .slice => {
                     if (ptr.child != u8) {
