@@ -68,7 +68,7 @@ fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ suite_path, filename }) catch return;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}{s}", .{ suite_path, filename });
 
     const content = readTestFile(allocator, path) catch |e| {
         // SONNY-2426: a missing file fails; it is not skipped. The suite is
@@ -85,6 +85,11 @@ fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
 
 /// Run every case in one suite file's JSON text, adding the results to `t` and
 /// reporting failing cases to `out` (stderr when null).
+///
+/// SONNY-2426: any failing case, including a validation error, fails the file
+/// with error.SchemaSuiteCaseFailed once every case has run and been reported,
+/// so the test-schema step exits non-zero. A group whose schema does not
+/// compile is counted as skipped and does not fail the file.
 fn runSuiteText(allocator: std.mem.Allocator, t: *Tally, out: ?*std.Io.Writer, filename: []const u8, content: []const u8) !void {
     var err = json.ParseError.init();
     var suite_doc = json.parse(allocator, content, .{}, &err) catch |e| {
@@ -94,7 +99,12 @@ fn runSuiteText(allocator: std.mem.Allocator, t: *Tally, out: ?*std.Io.Writer, f
     defer suite_doc.deinit();
 
     // Each test file is an array of test groups
+    if (suite_doc.root != .arr) {
+        printTo(out, "Test file {s} is not an array of test groups\n", .{filename});
+        return error.InvalidSuiteFile;
+    }
     const groups = suite_doc.root.arr;
+    const failed_before = t.failed;
 
     for (groups) |group| {
         const group_desc = getStr(group, "description") orelse "unknown";
@@ -156,6 +166,8 @@ fn runSuiteText(allocator: std.mem.Allocator, t: *Tally, out: ?*std.Io.Writer, f
             }
         }
     }
+
+    if (t.failed > failed_before) return error.SchemaSuiteCaseFailed;
 }
 
 fn getStr(v: json.Value, key: []const u8) ?[]const u8 {
