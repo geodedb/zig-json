@@ -1201,10 +1201,11 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
         .int, .comptime_int => {
             // SONNY-2405: allocate the lexeme at its exact length. It used to
             // be formatted into a fixed 32-byte buffer with `catch
-            // unreachable`, which overflowed for 128-bit and wider integers
-            // (maxInt(u128) has 39 digits, minInt(i128) is 40 bytes): a panic
-            // in safe modes, and in ReleaseFast undefined behaviour (observed
-            // as silent truncation to 32 characters, or a hang).
+            // unreachable`, which overflowed for any integer whose decimal
+            // form is 33 characters or more (u128 from 10^32, i128 from
+            // -10^31, or wider comptime_ints): a panic in safe modes, and in
+            // ReleaseFast undefined behaviour (observed as silent truncation
+            // to 32 characters, or a hang).
             const lexeme = try std.fmt.allocPrint(allocator, "{d}", .{value});
             errdefer allocator.free(lexeme);
             const digits = try normalizeDigits(allocator, lexeme);
@@ -1608,8 +1609,7 @@ fn expectWideStructRoundTrip(comptime T: type, value: T) !void {
 // roughly 1,100 branches, just past the default quota. This is a
 // *compile-time* regression, not a runtime panic: before the fix this test
 // does not compile at all. (24 short single-word field names do NOT
-// reproduce it.) Fix round 1 strengthened it from a key-order check to a full
-// typed round trip (json.unmarshal + expectEqualDeep).
+// reproduce it.)
 test "SONNY-2405: encode wide struct (24 mixed fields) with deterministic sorting round-trips" {
     const Wide = struct {
         scenario_name_field: i32 = 0,
@@ -1641,9 +1641,9 @@ test "SONNY-2405: encode wide struct (24 mixed fields) with deterministic sortin
     try expectWideStructRoundTrip(Wide, .{});
 }
 
-// SONNY-2405 (fix round 1): 64 fields sharing a 30-byte name prefix, declared
-// in reverse order, so every comparison walks most of the name. The sort
-// needs ~143,000 branches here against the 1,000 default.
+// SONNY-2405: 64 fields sharing a 30-byte name prefix, declared in reverse
+// order, so every comparison walks most of the name. The sort needs ~143,000
+// branches here against the 1,000 default.
 test "SONNY-2405 wide: 64 fields round-trip through deterministic encode and unmarshal" {
     const Wide64 = struct {
         benchmark_result_metric_field_063: i32 = -100,
@@ -1715,11 +1715,11 @@ test "SONNY-2405 wide: 64 fields round-trip through deterministic encode and unm
     try expectWideStructRoundTrip(Wide64, .{});
 }
 
-// SONNY-2405 (fix round 1): the sort's comptime cost scales with JSON-name
-// length as well as field count, so a quota sized from the field count alone
-// is not enough. json_config names such as JSON-LD IRIs can be long: these 24
-// share a 342-byte prefix and need ~192,000 branches, more than the
-// field-count-only bound of 1,000 + 24 * 24 * 256 = 148,456.
+// SONNY-2405: the sort's comptime cost scales with JSON-name length as well
+// as field count, so a quota sized from the field count alone is not enough.
+// json_config names such as JSON-LD IRIs can be long: these 24 share a
+// 342-byte prefix and need ~192,000 branches, more than the field-count-only
+// bound of 1,000 + 24 * 24 * 256 = 148,456.
 test "SONNY-2405 wide: long shared-prefix JSON names (IRIs) scale the sort quota" {
     const iri_prefix = "https://schema.example.org/" ++ ("benchmarks/vocabulary/" ** 14) ++ "metric_";
     const LongNames = struct {
@@ -2006,11 +2006,11 @@ test "SONNY-2405: toValue NaN/Infinity follow the allow_nan_infinity policy unch
     }
 }
 
-// SONNY-2405 (fix round 1): encode and toValue share one float formatter.
-// For every value the library could already render, it must produce the same
-// "{d}" (fixed-decimal) text as before SONNY-2405. Consumers compare and
-// classify lexemes (see the diffPatch and CBOR tests below), and
-// docs/EXAMPLES.md documents them.
+// SONNY-2405: encode and toValue share one float formatter. For every value
+// the library could already render, it must produce the same "{d}"
+// (fixed-decimal) text as before SONNY-2405. Consumers compare and classify
+// lexemes (see the diffPatch and CBOR tests below), and docs/EXAMPLES.md
+// documents them.
 test "SONNY-2405 float: toValue and encode keep the decimal spelling of ordinary floats" {
     const a = std.testing.allocator;
     const cases = .{
@@ -2028,6 +2028,14 @@ test "SONNY-2405 float: toValue and encode keep the decimal spelling of ordinary
         .{ @as(f32, 0.1), "0.1" },
         .{ @as(f16, 1.5), "1.5" },
         .{ 1.5, "1.5" }, // comptime_float
+        // SONNY-2405: pin the 347-byte threshold. A 53-byte
+        // (std.fmt.float.min_buffer_size) buffer cannot hold either lexeme
+        // below and would fall back to scientific notation instead
+        // (confirmed with a mutant: 1e60 becomes "1e60", 1/3 becomes
+        // "3.333...e-1"), so these two catch a regression the shorter cases
+        // above do not.
+        .{ @as(f64, 1e60), "1" ++ "0" ** 60 }, // needs 61 decimal bytes
+        .{ 1.0 / 3.0, "0.3333333333333333333333333333333333" }, // comptime_float (== f128); needs 36 decimal bytes but still overflows a 53-byte buffer
     };
     inline for (cases) |case| {
         const v = try toValue(a, case[0], .{});
@@ -2092,13 +2100,12 @@ test "SONNY-2405 float: cborEncode keeps an integral toValue float a CBOR intege
     try std.testing.expectEqualSlices(u8, &[_]u8{0x02}, bytes);
 }
 
-// SONNY-2405 (fix round 1): with one formatter behind both paths, encode(x)
-// and toValue(x) spell every finite float identically. That includes the
-// extremes that used to panic in toValue (anything longer than 32 bytes in
-// decimal) or print the invalid literal "(float)" in encode (decimal longer
-// than 347 bytes, e.g. tiny f80/f128 values). f80/f128 values above
-// floatMax(f64) are left out: their NaN/Inf pre-check narrows to f64, which
-// is tracked separately.
+// SONNY-2405: with one formatter behind both paths, encode(x) and toValue(x)
+// spell every finite float identically. That includes the extremes that used
+// to panic in toValue (anything longer than 32 bytes in decimal) or print the
+// invalid literal "(float)" in encode (decimal longer than 347 bytes, e.g.
+// tiny f80/f128 values). f80/f128 values above floatMax(f64) are left out:
+// their NaN/Inf pre-check narrows to f64, which is tracked separately.
 test "SONNY-2405 float: encode and toValue spell every float identically" {
     const a = std.testing.allocator;
     inline for (.{ f16, f32, f64, f80, f128 }) |T| {
@@ -2122,11 +2129,11 @@ test "SONNY-2405 float: encode and toValue spell every float identically" {
     }
 }
 
-// SONNY-2405 (fix round 1): encode printed the invalid literal "(float)" for
-// these. std.Io.Writer renders "{d}" into a fixed 347-byte buffer and
-// substitutes "(float)" when the decimal does not fit, and tiny f80/f128
-// values need thousands of decimal digits. They must come out as JSON numbers
-// that json.parse accepts and that round-trip exactly.
+// SONNY-2405: encode printed the invalid literal "(float)" for these.
+// std.Io.Writer renders "{d}" into a fixed 347-byte buffer and substitutes
+// "(float)" when the decimal does not fit, and tiny f80/f128 values need
+// thousands of decimal digits. They must come out as JSON numbers that
+// json.parse accepts and that round-trip exactly.
 test "SONNY-2405 float: tiny f80/f128 values encode as valid JSON numbers" {
     const a = std.testing.allocator;
     inline for (.{ f80, f128 }) |T| {
@@ -2176,11 +2183,13 @@ fn expectIntegerLexeme(value: anytype, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, doc.root.num.lexeme);
 }
 
-// SONNY-2405 (fix round 1): toValue formatted integers into a fixed 32-byte
-// buffer and `catch unreachable`d NoSpaceLeft. Any integer of 33 or more
-// characters (u128/i128 from 10^32 up, wider comptime_ints) panicked in
-// Debug/ReleaseSafe and was undefined behaviour in ReleaseFast (observed as a
-// hang). encode() was never affected: it prints straight to its writer.
+// SONNY-2405: toValue formatted integers into a fixed 32-byte buffer and
+// `catch unreachable`d NoSpaceLeft. Any integer whose decimal form is 33
+// characters or more overflowed: u128/i128 from 10^32 up, negative i128 from
+// -10^31 down (33 characters with the sign), and wider comptime_ints. That
+// was undefined behaviour: a panic in Debug/ReleaseSafe, and in ReleaseFast
+// either silent truncation or a hang. encode() was never affected: it prints
+// straight to its writer.
 // Expected strings were computed independently (Python int arithmetic).
 test "SONNY-2405 int: toValue lexemes that fit the old 32-byte buffer are unchanged (control)" {
     try expectIntegerLexeme(@as(u64, std.math.maxInt(u64)), "18446744073709551615");
