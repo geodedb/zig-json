@@ -372,7 +372,22 @@ test "schema suite: boolean_schema" {
 // Summary (runs last)
 // ============================================================
 
+/// SONNY-2426: JSON_SCHEMA_SUITE_VERBOSE=1 prints the summary even when every
+/// case passes.
+fn verboseRequested() bool {
+    const value = std.testing.environ.getAlloc(std.testing.allocator, "JSON_SCHEMA_SUITE_VERBOSE") catch return false;
+    defer std.testing.allocator.free(value);
+    return std.mem.eql(u8, value, "1");
+}
+
+// SONNY-2426: a passing run prints nothing. Zig's build runner shows any test
+// stderr under a "failed command:" label even when the step succeeds, so an
+// unconditional summary made every clean run look like a failure. The summary
+// prints when a case failed (each failure has already printed its FAIL line)
+// or when JSON_SCHEMA_SUITE_VERBOSE=1 asks for it.
 test "schema suite: summary" {
+    if (failed_tests == 0 and !verboseRequested()) return;
+
     std.debug.print("\n========================================\n", .{});
     std.debug.print("JSON Schema Test Suite Results:\n", .{});
     std.debug.print("  Total:   {}\n", .{total_tests});
