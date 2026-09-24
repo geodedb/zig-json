@@ -163,6 +163,10 @@ if (report.ok) {
 # Build the library
 zig build
 
+# Fetch the JSON Schema Test Suite (not vendored) at the commit CI pins.
+# test-schema and test-all fail, naming this command, until it has run.
+scripts/fetch-json-schema-test-suite.sh
+
 # Run all tests
 zig build test-all --summary all
 

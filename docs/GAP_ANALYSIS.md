@@ -37,20 +37,22 @@
 | GAP-009 | JSON-LD `@import` context keyword silently skipped; blank-node counter is global mutable state | Partial | Medium | `src/jsonld.zig:619-680,970` |
 | GAP-010 | JSON-LD remote context loading is a no-op placeholder | Partial | Medium | `src/jsonld.zig:282-288` |
 | GAP-011 | `parallel.zig` tail-element drop: floor-division chunk math leaves up to 63 elements unprocessed; uninitialized reads | Partial | High | `src/parallel.zig:89,102-113,193,262` |
-| GAP-012 | JSON Schema official Test Suite fixtures missing; 37/38 `test-schema` fail with `FileNotFound` (harness should skip gracefully) | Not Implemented | High | `testdata/JSON-Schema-Test-Suite/` (empty); `tests/schema_suite.zig` |
+| GAP-012 | JSON Schema official Test Suite fixtures missing; 37/38 `test-schema` fail with `FileNotFound` (the fixtures must be fetchable, and a run without them must not pass) | Not Implemented | High | `testdata/JSON-Schema-Test-Suite/` (empty); `tests/schema_suite.zig` |
 
 ## Notes
 
 - GAP-001/004 overlap security ASR-020 and quality QUAL-026 (regex correctness). GAP-002 overlaps ASR-021. GAP-003 overlaps ASR-005/ASR-014/QUAL-006. GAP-006/007 overlap QUAL-001/PERF-001. GAP-011 overlaps ASR-013/PERF-009. These are tracked once and closed together by module.
-- GAP-012 fix: make `tests/schema_suite.zig` skip with a clear message (not `FileNotFound` failures) when the suite directory is absent, so local `test-all` is green without the external clone; keep CI cloning a pinned SHA.
+- GAP-012 fix: fetch the suite with `scripts/fetch-json-schema-test-suite.sh`, the pinned-SHA clone CI also runs. Without it, `zig build test-schema` and `test-all` fail and name that command. SONNY-2426 replaced the original fix, which skipped the suite gracefully and let `test-all` pass vacuously.
 
 ---
 
 ## Resolution Status (updated 2026-06-11, commit 458bf24)
 
 All gaps were addressed across two review/fix passes. Verification: `zig build
-test-all` = 14/14 steps, 475/512 pass (37 schema-suite tests skip gracefully when
-the external suite is absent).
+test-all` = 14/14 steps, 475/512 pass (at the time, 37 schema-suite tests skipped
+when the external suite was absent). Since SONNY-2426, `test-all` fails without
+the suite and names `scripts/fetch-json-schema-test-suite.sh`. With the suite,
+any failing case or unexpected skip fails the step.
 
 | Gap-ID | Status | Resolution |
 |--------|--------|-----------|
@@ -65,7 +67,7 @@ the external suite is absent).
 | GAP-009 | Resolved | `@import` resolved/merged; blank-node counter per-instance. |
 | GAP-010 | Resolved (fail-closed) | URL contexts with no loader return an error; built-in network loader remains out of scope by design. |
 | GAP-011 | Resolved | Parallel chunking covers the full input. |
-| GAP-012 | Resolved | Schema suite skips gracefully when fixtures are absent; CI clone pinned to a SHA. |
+| GAP-012 | Resolved (reworked by SONNY-2426) | `scripts/fetch-json-schema-test-suite.sh` fetches the suite at the pinned SHA, and CI runs the same script. Without the suite, `test-schema` and `test-all` fail and name that command. With it, any failing case or unexpected skip fails the step; only 5 pinned Unicode-property-escape cases may skip. |
 
 ## Deferred / Accepted by Design
 
