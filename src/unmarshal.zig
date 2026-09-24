@@ -2378,3 +2378,83 @@ test "NEW-002: non-exhaustive enum accepts in-range int" {
     const f = try unmarshal(Flags, std.testing.allocator, "5");
     try std.testing.expectEqual(@as(Flags, @enumFromInt(5)), f);
 }
+
+// SONNY-2443: freeInternal takes `*T`, but it reached the elements of a
+// `[]const T` field (and the pointee of a `*const T` field) as `*const T`. So
+// typed unmarshal of any struct with a []const []const u8, []const SomeStruct
+// or *const SomeStruct field did not compile: json.free and the ASR-011
+// cleanup (freePopulatedFields) both instantiate freeInternal for every field,
+// so even an arena-owned unmarshal failed. These run under the leak-checking
+// testing allocator: json.free must release everything on success, and the
+// error paths must release the already-populated []const and *const fields.
+const ConstRule = struct {
+    id: []const u8,
+    tags: []const []const u8,
+};
+
+const ConstPolicy = struct {
+    name: []const u8,
+    scopes: []const []const u8,
+    rules: []const ConstRule,
+    owner: *const ConstRule,
+    version: u32,
+};
+
+test "SONNY-2443: unmarshal and free []const slices and *const pointers" {
+    const a = std.testing.allocator;
+    const input =
+        \\{"name":"p","scopes":["read","write"],
+        \\ "rules":[{"id":"r1","tags":["x"]},{"id":"r2","tags":[]}],
+        \\ "owner":{"id":"o","tags":["y","z"]},"version":3}
+    ;
+
+    var p = try unmarshal(ConstPolicy, a, input);
+    defer free(ConstPolicy, a, &p);
+    try std.testing.expectEqualStrings("write", p.scopes[1]);
+    try std.testing.expectEqual(@as(usize, 2), p.rules.len);
+    try std.testing.expectEqualStrings("x", p.rules[0].tags[0]);
+    try std.testing.expectEqual(@as(usize, 0), p.rules[1].tags.len);
+    try std.testing.expectEqualStrings("z", p.owner.tags[1]);
+    try std.testing.expectEqual(@as(u32, 3), p.version);
+
+    switch (unmarshalWithInfo(ConstPolicy, a, input)) {
+        .ok => |ok| {
+            var q = ok;
+            defer free(ConstPolicy, a, &q);
+            try std.testing.expectEqualStrings("o", q.owner.id);
+        },
+        .err => return error.TestUnexpectedResult,
+    }
+}
+
+test "SONNY-2443: failures free the []const and *const fields already built (ASR-011)" {
+    const a = std.testing.allocator;
+    // A later field fails after every []const and *const field was populated.
+    const late_field =
+        \\{"name":"p","scopes":["read"],"rules":[{"id":"r1","tags":["x"]}],
+        \\ "owner":{"id":"o","tags":["y"]},"version":"three"}
+    ;
+    // An element of a []const slice fails after an earlier element was built.
+    const late_element =
+        \\{"name":"p","scopes":["read"],"rules":[{"id":"r1","tags":["x"]},{"id":"r2","tags":["y",2]}],
+        \\ "owner":{"id":"o","tags":[]},"version":1}
+    ;
+
+    try std.testing.expectError(error.TypeMismatch, unmarshal(ConstPolicy, a, late_field));
+    try std.testing.expectError(error.TypeMismatch, unmarshal(ConstPolicy, a, late_element));
+
+    const cases = [_]struct { input: []const u8, path: []const u8 }{
+        .{ .input = late_field, .path = "/version" },
+        .{ .input = late_element, .path = "/rules/1/tags/1" },
+    };
+    for (cases) |case| {
+        switch (unmarshalWithInfo(ConstPolicy, a, case.input)) {
+            .ok => return error.TestUnexpectedResult,
+            .err => |err| {
+                defer if (err.path.len > 0) a.free(err.path);
+                try std.testing.expect(err.kind == .type_mismatch);
+                try std.testing.expectEqualStrings(case.path, err.path);
+            },
+        }
+    }
+}
