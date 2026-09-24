@@ -1523,15 +1523,59 @@ test "encode floats" {
     try std.testing.expectEqualStrings("null", inf);
 }
 
+fn lessThanString(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+/// SONNY-2405: shared oracle for the wide-struct tests. Deterministic
+/// encoding must emit every JSON name in the order a *runtime* sort produces
+/// (the sort under test runs at comptime, under a branch quota); both the
+/// sorted and the declaration-order encodings must unmarshal back to a deeply
+/// equal value; and the json.Value path (toValue, then encode) must reproduce
+/// the writer path byte-for-byte.
+fn expectWideStructRoundTrip(comptime T: type, value: T) !void {
+    const a = std.testing.allocator;
+    const fields = @typeInfo(T).@"struct".fields;
+
+    var expected: [fields.len][]const u8 = undefined;
+    inline for (fields, 0..) |field, i| expected[i] = comptime getJsonName(T, field.name);
+    std.mem.sort([]const u8, &expected, {}, lessThanString);
+
+    const sorted = try encode(a, value, .{ .deterministic = true });
+    defer a.free(sorted);
+    var perr = json.ParseError.init();
+    var doc = try json.parse(a, sorted, .{}, &perr);
+    defer doc.deinit();
+    try std.testing.expect(doc.root == .obj);
+    try std.testing.expectEqual(fields.len, doc.root.obj.len);
+    for (expected, doc.root.obj) |name, member| {
+        try std.testing.expectEqualStrings(name, member.k);
+    }
+
+    const declared = try encode(a, value, .{});
+    defer a.free(declared);
+    for ([_][]const u8{ sorted, declared }) |text| {
+        var back = try json.unmarshal(T, a, text);
+        defer json.free(T, a, &back);
+        try std.testing.expectEqualDeep(value, back);
+    }
+
+    const tree = try toValue(a, value, .{});
+    defer freeValue(a, tree);
+    const reencoded = try encode(a, tree, .{});
+    defer a.free(reencoded);
+    try std.testing.expectEqualStrings(declared, reencoded);
+}
+
 // SONNY-2405: a struct with enough fields to exceed the default comptime
 // branch quota (1000) in getSortedFieldIndices's bubble sort. Each of the
 // O(n^2) comparisons calls std.mem.order over the field-name bytes, so cost
-// scales with both field count AND name length; 24 realistic ~20-byte field
-// names (typical of a benchmark-result-style struct) blows well past the
-// default quota with no @setEvalBranchQuota set. This is a *compile-time*
-// regression, not a runtime panic: today, this test fails to compile at all.
-// (24 short single-word field names do NOT reproduce this — calibrated with
-// a standalone probe against this exact Zig 0.16.0 toolchain.)
+// scales with both field count AND name length; these 24 ~20-byte names need
+// roughly 1,100 branches, just past the default quota. This is a
+// *compile-time* regression, not a runtime panic: before the fix this test
+// does not compile at all. (24 short single-word field names do NOT
+// reproduce it.) Fix round 1 strengthened it from a key-order check to a full
+// typed round trip (json.unmarshal + expectEqualDeep).
 test "SONNY-2405: encode wide struct (24 mixed fields) with deterministic sorting round-trips" {
     const Wide = struct {
         scenario_name_field: i32 = 0,
@@ -1560,43 +1604,145 @@ test "SONNY-2405: encode wide struct (24 mixed fields) with deterministic sortin
         baseline_delta_pct_: f64 = 23.25,
     };
 
-    const w = Wide{};
-    const s = try encode(std.testing.allocator, w, .{ .deterministic = true });
-    defer std.testing.allocator.free(s);
+    try expectWideStructRoundTrip(Wide, .{});
+}
 
-    var perr = json.ParseError.init();
-    var doc = try json.parse(std.testing.allocator, s, .{}, &perr);
-    defer doc.deinit();
-
-    try std.testing.expect(doc.root == .obj);
-    try std.testing.expectEqual(@as(usize, 24), doc.root.obj.len);
-
-    // Deterministic sort must produce strictly increasing key order.
-    var i: usize = 1;
-    while (i < doc.root.obj.len) : (i += 1) {
-        try std.testing.expect(std.mem.order(u8, doc.root.obj[i - 1].k, doc.root.obj[i].k) == .lt);
-    }
-
-    // Independently compute the expected alphabetical order at *runtime*
-    // (std.mem.sort, not comptime, so this oracle is not subject to the same
-    // branch quota as the code under test) and compare it against the full
-    // parsed key order, field by field.
-    var expected = [_][]const u8{
-        "scenario_name_field", "duration_nanoseconds", "iteration_count_val", "mean_latency_ns_val",
-        "median_latency_ns_v", "stddev_latency_ns_v",  "minimum_latency_val", "maximum_latency_val",
-        "p50_latency_ns_val_", "p95_latency_ns_val_",  "p99_latency_ns_val_", "throughput_ops_sec_",
-        "allocations_count_v", "bytes_allocated_val",  "gc_pause_time_ns_v_", "cpu_utilization_pct",
-        "memory_peak_bytes_v", "cache_hit_ratio_val",  "error_count_total_v", "warning_count_val_v",
-        "retry_count_total_v", "timeout_count_val_v",  "success_rate_pct_v_", "baseline_delta_pct_",
+// SONNY-2405 (fix round 1): 64 fields sharing a 30-byte name prefix, declared
+// in reverse order, so every comparison walks most of the name. The sort
+// needs ~143,000 branches here against the 1,000 default.
+test "SONNY-2405 wide: 64 fields round-trip through deterministic encode and unmarshal" {
+    const Wide64 = struct {
+        benchmark_result_metric_field_063: i32 = -100,
+        benchmark_result_metric_field_062: []const u8 = "value 1",
+        benchmark_result_metric_field_061: bool = false,
+        benchmark_result_metric_field_060: f64 = 3.25,
+        benchmark_result_metric_field_059: u64 = 4000012,
+        benchmark_result_metric_field_058: i64 = -5000165,
+        benchmark_result_metric_field_057: i32 = -58,
+        benchmark_result_metric_field_056: []const u8 = "value 7",
+        benchmark_result_metric_field_055: bool = true,
+        benchmark_result_metric_field_054: f64 = 0.1,
+        benchmark_result_metric_field_053: u64 = 10000030,
+        benchmark_result_metric_field_052: i64 = -11000363,
+        benchmark_result_metric_field_051: i32 = -16,
+        benchmark_result_metric_field_050: []const u8 = "value 13",
+        benchmark_result_metric_field_049: bool = false,
+        benchmark_result_metric_field_048: f64 = -2.5,
+        benchmark_result_metric_field_047: u64 = 16000048,
+        benchmark_result_metric_field_046: i64 = -17000561,
+        benchmark_result_metric_field_045: i32 = 26,
+        benchmark_result_metric_field_044: []const u8 = "value 19",
+        benchmark_result_metric_field_043: bool = true,
+        benchmark_result_metric_field_042: f64 = 1e21,
+        benchmark_result_metric_field_041: u64 = 22000066,
+        benchmark_result_metric_field_040: i64 = -23000759,
+        benchmark_result_metric_field_039: i32 = 68,
+        benchmark_result_metric_field_038: []const u8 = "value 25",
+        benchmark_result_metric_field_037: bool = false,
+        benchmark_result_metric_field_036: f64 = 1.5e-7,
+        benchmark_result_metric_field_035: u64 = 28000084,
+        benchmark_result_metric_field_034: i64 = -29000957,
+        benchmark_result_metric_field_033: i32 = 110,
+        benchmark_result_metric_field_032: []const u8 = "value 31",
+        benchmark_result_metric_field_031: bool = true,
+        benchmark_result_metric_field_030: f64 = 10.5,
+        benchmark_result_metric_field_029: u64 = 34000102,
+        benchmark_result_metric_field_028: i64 = -35001155,
+        benchmark_result_metric_field_027: i32 = 152,
+        benchmark_result_metric_field_026: []const u8 = "value 37",
+        benchmark_result_metric_field_025: bool = false,
+        benchmark_result_metric_field_024: f64 = 3.25,
+        benchmark_result_metric_field_023: u64 = 40000120,
+        benchmark_result_metric_field_022: i64 = -41001353,
+        benchmark_result_metric_field_021: i32 = 194,
+        benchmark_result_metric_field_020: []const u8 = "value 43",
+        benchmark_result_metric_field_019: bool = true,
+        benchmark_result_metric_field_018: f64 = 0.1,
+        benchmark_result_metric_field_017: u64 = 46000138,
+        benchmark_result_metric_field_016: i64 = -47001551,
+        benchmark_result_metric_field_015: i32 = 236,
+        benchmark_result_metric_field_014: []const u8 = "value 49",
+        benchmark_result_metric_field_013: bool = false,
+        benchmark_result_metric_field_012: f64 = -2.5,
+        benchmark_result_metric_field_011: u64 = 52000156,
+        benchmark_result_metric_field_010: i64 = -53001749,
+        benchmark_result_metric_field_009: i32 = 278,
+        benchmark_result_metric_field_008: []const u8 = "value 55",
+        benchmark_result_metric_field_007: bool = true,
+        benchmark_result_metric_field_006: f64 = 1e21,
+        benchmark_result_metric_field_005: u64 = 58000174,
+        benchmark_result_metric_field_004: i64 = -59001947,
+        benchmark_result_metric_field_003: i32 = 320,
+        benchmark_result_metric_field_002: []const u8 = "value 61",
+        benchmark_result_metric_field_001: bool = false,
+        benchmark_result_metric_field_000: f64 = 1.5e-7,
     };
-    std.mem.sort([]const u8, &expected, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
-        }
-    }.lessThan);
-    for (doc.root.obj, 0..) |m, idx| {
-        try std.testing.expectEqualStrings(expected[idx], m.k);
-    }
+
+    try expectWideStructRoundTrip(Wide64, .{});
+}
+
+// SONNY-2405 (fix round 1): the sort's comptime cost scales with JSON-name
+// length as well as field count, so a quota sized from the field count alone
+// is not enough. json_config names such as JSON-LD IRIs can be long: these 24
+// share a 342-byte prefix and need ~192,000 branches, more than the
+// field-count-only bound of 1,000 + 24 * 24 * 256 = 148,456.
+test "SONNY-2405 wide: long shared-prefix JSON names (IRIs) scale the sort quota" {
+    const iri_prefix = "https://schema.example.org/" ++ ("benchmarks/vocabulary/" ** 14) ++ "metric_";
+    const LongNames = struct {
+        m23: i32 = -100,
+        m22: []const u8 = "value 1",
+        m21: bool = false,
+        m20: f64 = 3.25,
+        m19: u64 = 4000012,
+        m18: i64 = -5000165,
+        m17: i32 = -58,
+        m16: []const u8 = "value 7",
+        m15: bool = true,
+        m14: f64 = 0.1,
+        m13: u64 = 10000030,
+        m12: i64 = -11000363,
+        m11: i32 = -16,
+        m10: []const u8 = "value 13",
+        m09: bool = false,
+        m08: f64 = -2.5,
+        m07: u64 = 16000048,
+        m06: i64 = -17000561,
+        m05: i32 = 26,
+        m04: []const u8 = "value 19",
+        m03: bool = true,
+        m02: f64 = 1e21,
+        m01: u64 = 22000066,
+        m00: i64 = -23000759,
+
+        pub const json_config = .{
+            .m23 = FieldConfig{ .name = iri_prefix ++ "23" },
+            .m22 = FieldConfig{ .name = iri_prefix ++ "22" },
+            .m21 = FieldConfig{ .name = iri_prefix ++ "21" },
+            .m20 = FieldConfig{ .name = iri_prefix ++ "20" },
+            .m19 = FieldConfig{ .name = iri_prefix ++ "19" },
+            .m18 = FieldConfig{ .name = iri_prefix ++ "18" },
+            .m17 = FieldConfig{ .name = iri_prefix ++ "17" },
+            .m16 = FieldConfig{ .name = iri_prefix ++ "16" },
+            .m15 = FieldConfig{ .name = iri_prefix ++ "15" },
+            .m14 = FieldConfig{ .name = iri_prefix ++ "14" },
+            .m13 = FieldConfig{ .name = iri_prefix ++ "13" },
+            .m12 = FieldConfig{ .name = iri_prefix ++ "12" },
+            .m11 = FieldConfig{ .name = iri_prefix ++ "11" },
+            .m10 = FieldConfig{ .name = iri_prefix ++ "10" },
+            .m09 = FieldConfig{ .name = iri_prefix ++ "09" },
+            .m08 = FieldConfig{ .name = iri_prefix ++ "08" },
+            .m07 = FieldConfig{ .name = iri_prefix ++ "07" },
+            .m06 = FieldConfig{ .name = iri_prefix ++ "06" },
+            .m05 = FieldConfig{ .name = iri_prefix ++ "05" },
+            .m04 = FieldConfig{ .name = iri_prefix ++ "04" },
+            .m03 = FieldConfig{ .name = iri_prefix ++ "03" },
+            .m02 = FieldConfig{ .name = iri_prefix ++ "02" },
+            .m01 = FieldConfig{ .name = iri_prefix ++ "01" },
+            .m00 = FieldConfig{ .name = iri_prefix ++ "00" },
+        };
+    };
+
+    try expectWideStructRoundTrip(LongNames, .{});
 }
 
 test "encode string" {
@@ -1742,12 +1888,12 @@ test "toValue struct" {
     try std.testing.expectEqual(@as(usize, 2), v.obj.len);
 }
 
-// SONNY-2405: toValue's float lexeme is built with std.fmt.bufPrint into a
+// SONNY-2405: toValue's float lexeme was built with std.fmt.bufPrint into a
 // fixed 32-byte buffer using the "{d}" (fixed decimal) specifier, then
-// `catch unreachable`s NoSpaceLeft. "{d}" on floats never uses scientific
+// `catch unreachable`d NoSpaceLeft. "{d}" on floats never uses scientific
 // notation, so its length is unbounded by magnitude: floatMax(f64) needs
 // 309 decimal digits and floatTrueMin(f64) needs 326 (std.fmt.float.
-// bufferSize(.decimal, f64) == 347). Both panic today.
+// bufferSize(.decimal, f64) == 347). Both panicked before the fix.
 test "SONNY-2405: toValue of extreme f64 magnitudes produces valid JSON numbers (no panic)" {
     const values = [_]f64{
         std.math.floatMax(f64),
@@ -1764,9 +1910,19 @@ test "SONNY-2405: toValue of extreme f64 magnitudes produces valid JSON numbers 
         const round_tripped = try std.fmt.parseFloat(f64, val.num.lexeme);
         try std.testing.expectEqual(v, round_tripped);
 
-        // encode (writer path) is not affected (std.Io.Writer sizes its own
-        // scratch space per type), but is pinned here alongside the toValue
-        // fix so the two paths can't silently diverge.
+        // The lexeme must itself be a JSON number, not merely something
+        // std.fmt.parseFloat accepts.
+        var lex_perr = json.ParseError.init();
+        var lex_doc = try json.parse(std.testing.allocator, val.num.lexeme, .{}, &lex_perr);
+        defer lex_doc.deinit();
+        try std.testing.expect(lex_doc.root == .num);
+        try std.testing.expectEqual(v, try std.fmt.parseFloat(f64, lex_doc.root.num.lexeme));
+
+        // encode (writer path) rendered these before the fix too: std.Io.Writer
+        // formats "{d}" into a fixed 347-byte buffer
+        // (std.fmt.float.bufferSize(.decimal, f64)), which holds every f64
+        // decimal. It does not hold wider types' decimals (see the tiny
+        // f80/f128 test below). Pinned here alongside the toValue fix.
         const s = try encode(std.testing.allocator, v, .{});
         defer std.testing.allocator.free(s);
         const s_round_tripped = try std.fmt.parseFloat(f64, s);
@@ -1814,6 +1970,228 @@ test "SONNY-2405: toValue NaN/Infinity follow the allow_nan_infinity policy unch
         defer freeValue(std.testing.allocator, ninf_val);
         try std.testing.expectEqualStrings("-Infinity", ninf_val.str);
     }
+}
+
+// SONNY-2405 (fix round 1): encode and toValue share one float formatter.
+// For every value the library could already render, it must produce the same
+// "{d}" (fixed-decimal) text as before SONNY-2405. Consumers compare and
+// classify lexemes (see the diffPatch and CBOR tests below), and
+// docs/EXAMPLES.md documents them.
+test "SONNY-2405 float: toValue and encode keep the decimal spelling of ordinary floats" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ @as(f64, 3.25), "3.25" },
+        .{ @as(f64, 1.0), "1" },
+        .{ @as(f64, 2.0), "2" },
+        .{ @as(f64, 0.1), "0.1" },
+        .{ @as(f64, 10.5), "10.5" },
+        .{ @as(f64, -2.5), "-2.5" },
+        .{ @as(f64, 0.0), "0" },
+        .{ -@as(f64, 0.0), "-0" },
+        .{ @as(f64, 1e21), "1000000000000000000000" },
+        .{ @as(f64, 1.5e-7), "0.00000015" },
+        .{ @as(f32, 3.25), "3.25" },
+        .{ @as(f32, 0.1), "0.1" },
+        .{ @as(f16, 1.5), "1.5" },
+        .{ 1.5, "1.5" }, // comptime_float
+    };
+    inline for (cases) |case| {
+        const v = try toValue(a, case[0], .{});
+        defer freeValue(a, v);
+        try std.testing.expect(v == .num);
+        try std.testing.expectEqualStrings(case[1], v.num.lexeme);
+
+        const s = try encode(a, case[0], .{});
+        defer a.free(s);
+        try std.testing.expectEqualStrings(case[1], s);
+    }
+}
+
+// docs/EXAMPLES.md, "Custom Marshaler": this exact output is documented.
+test "SONNY-2405 float: docs/EXAMPLES.md custom marshaler output is unchanged" {
+    const Point3D = struct {
+        x: f64,
+        y: f64,
+        z: f64,
+
+        pub fn jsonMarshal(self: @This(), alloc: std.mem.Allocator) !Value {
+            var arr = try alloc.alloc(Value, 3);
+            arr[0] = try toValue(alloc, self.x, .{});
+            arr[1] = try toValue(alloc, self.y, .{});
+            arr[2] = try toValue(alloc, self.z, .{});
+            return .{ .arr = arr };
+        }
+    };
+
+    const p = Point3D{ .x = 1.0, .y = 2.0, .z = 3.0 };
+    const out = try encode(std.testing.allocator, p, .{ .allocator = std.testing.allocator });
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("[1,2,3]", out);
+}
+
+// diffPatch compares numbers by lexeme (patch.zig valuesEqual), so a toValue
+// float spelled differently from the parsed text shows up as a spurious
+// "replace".
+test "SONNY-2405 float: diffPatch sees no change between parsed JSON and toValue of the same floats" {
+    const a = std.testing.allocator;
+    const Rec = struct { x: f64, n: i32 };
+
+    var perr = json.ParseError.init();
+    var doc = try json.parse(a, "{\"x\":1.5,\"n\":2}", .{}, &perr);
+    defer doc.deinit();
+
+    const tree = try toValue(a, Rec{ .x = 1.5, .n = 2 }, .{});
+    defer freeValue(a, tree);
+    const ops = try json.diffPatch(a, doc.root, tree);
+    defer json.freeDiffOperations(a, ops);
+    try std.testing.expectEqual(@as(usize, 0), ops.len);
+}
+
+// cborEncode encodes an integral lexeme ("2") as a CBOR integer and anything
+// with a '.' or exponent as a float, so the lexeme spelling decides the bytes.
+test "SONNY-2405 float: cborEncode keeps an integral toValue float a CBOR integer" {
+    const a = std.testing.allocator;
+    const v = try toValue(a, @as(f64, 2.0), .{});
+    defer freeValue(a, v);
+    const bytes = try json.cborEncode(a, v, .{});
+    defer a.free(bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x02}, bytes);
+}
+
+// SONNY-2405 (fix round 1): with one formatter behind both paths, encode(x)
+// and toValue(x) spell every finite float identically. That includes the
+// extremes that used to panic in toValue (anything longer than 32 bytes in
+// decimal) or print the invalid literal "(float)" in encode (decimal longer
+// than 347 bytes, e.g. tiny f80/f128 values). f80/f128 values above
+// floatMax(f64) are left out: their NaN/Inf pre-check narrows to f64, which
+// is tracked separately.
+test "SONNY-2405 float: encode and toValue spell every float identically" {
+    const a = std.testing.allocator;
+    inline for (.{ f16, f32, f64, f80, f128 }) |T| {
+        const M = std.math;
+        const common = [_]T{
+            M.floatTrueMin(T), -M.floatTrueMin(T), M.floatMin(T), M.floatEps(T), 1.0 / 3.0,
+            3.25,              1.0,                0.0,           -@as(T, 0.0),  0.1,
+        };
+        const large = if (@bitSizeOf(T) <= 64)
+            [_]T{ M.floatMax(T), -M.floatMax(T) }
+        else
+            [_]T{ 1e308, -1e308 };
+        for (common ++ large) |v| {
+            const s = try encode(a, v, .{});
+            defer a.free(s);
+            const tv = try toValue(a, v, .{});
+            defer freeValue(a, tv);
+            try std.testing.expect(tv == .num);
+            try std.testing.expectEqualStrings(s, tv.num.lexeme);
+        }
+    }
+}
+
+// SONNY-2405 (fix round 1): encode printed the invalid literal "(float)" for
+// these. std.Io.Writer renders "{d}" into a fixed 347-byte buffer and
+// substitutes "(float)" when the decimal does not fit, and tiny f80/f128
+// values need thousands of decimal digits. They must come out as JSON numbers
+// that json.parse accepts and that round-trip exactly.
+test "SONNY-2405 float: tiny f80/f128 values encode as valid JSON numbers" {
+    const a = std.testing.allocator;
+    inline for (.{ f80, f128 }) |T| {
+        const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+        const values = [_]T{
+            std.math.floatTrueMin(T),
+            -std.math.floatTrueMin(T),
+            std.math.floatMin(T),
+            1e-400,
+            (@as(T, 1.0) / @as(T, 3.0)) * @as(T, 1e-310),
+        };
+        for (values) |v| {
+            const s = try encode(a, v, .{});
+            defer a.free(s);
+            var perr = json.ParseError.init();
+            var doc = try json.parse(a, s, .{}, &perr);
+            defer doc.deinit();
+            try std.testing.expect(doc.root == .num);
+            const back = try std.fmt.parseFloat(T, s);
+            try std.testing.expectEqual(@as(Bits, @bitCast(v)), @as(Bits, @bitCast(back)));
+        }
+    }
+}
+
+/// SONNY-2405: toValue must render the integer `value` as exactly `expected`,
+/// keep sign/digits/exp10 consistent with it, agree byte-for-byte with the
+/// writer path, and produce a lexeme json.parse accepts as a number.
+fn expectIntegerLexeme(value: anytype, expected: []const u8) !void {
+    const a = std.testing.allocator;
+    const v = try toValue(a, value, .{});
+    defer freeValue(a, v);
+    try std.testing.expect(v == .num);
+    try std.testing.expectEqualStrings(expected, v.num.lexeme);
+    const negative = expected[0] == '-';
+    try std.testing.expectEqual(@as(i8, if (negative) -1 else 1), v.num.sign);
+    try std.testing.expectEqualStrings(expected[@intFromBool(negative)..], v.num.digits);
+    try std.testing.expectEqual(@as(i32, 0), v.num.exp10);
+
+    const s = try encode(a, value, .{});
+    defer a.free(s);
+    try std.testing.expectEqualStrings(expected, s);
+
+    var perr = json.ParseError.init();
+    var doc = try json.parse(a, v.num.lexeme, .{}, &perr);
+    defer doc.deinit();
+    try std.testing.expect(doc.root == .num);
+    try std.testing.expectEqualStrings(expected, doc.root.num.lexeme);
+}
+
+// SONNY-2405 (fix round 1): toValue formatted integers into a fixed 32-byte
+// buffer and `catch unreachable`d NoSpaceLeft. Any integer of 33 or more
+// characters (u128/i128 from 10^32 up, wider comptime_ints) panicked in
+// Debug/ReleaseSafe and was undefined behaviour in ReleaseFast (observed as a
+// hang). encode() was never affected: it prints straight to its writer.
+// Expected strings were computed independently (Python int arithmetic).
+test "SONNY-2405 int: toValue lexemes that fit the old 32-byte buffer are unchanged (control)" {
+    try expectIntegerLexeme(@as(u64, std.math.maxInt(u64)), "18446744073709551615");
+    try expectIntegerLexeme(@as(u128, 99999999999999999999999999999999), "99999999999999999999999999999999");
+    try expectIntegerLexeme(@as(i32, -42), "-42");
+    try expectIntegerLexeme(@as(u8, 0), "0");
+}
+
+test "SONNY-2405 int: toValue of 10^32, the first 33-digit value" {
+    try expectIntegerLexeme(@as(u128, 100000000000000000000000000000000), "100000000000000000000000000000000");
+}
+
+test "SONNY-2405 int: toValue of a UUID-style u128" {
+    try expectIntegerLexeme(@as(u128, 0x3d6f4f0e_7b1c_4a8e_9c2d_5e6f7a8b9c0d), "81660856151831056012349132679412423693");
+}
+
+test "SONNY-2405 int: toValue of maxInt(u128)" {
+    try expectIntegerLexeme(@as(u128, std.math.maxInt(u128)), "340282366920938463463374607431768211455");
+}
+
+test "SONNY-2405 int: toValue of minInt(i128)" {
+    try expectIntegerLexeme(@as(i128, std.math.minInt(i128)), "-170141183460469231731687303715884105728");
+}
+
+test "SONNY-2405 int: toValue of comptime_int 1 << 200" {
+    try expectIntegerLexeme(1 << 200, "1606938044258990275541962092341162602522202993782792835301376");
+}
+
+test "SONNY-2405 int: toValue of a struct with a u128 id field" {
+    const a = std.testing.allocator;
+    const Rec = struct { id: u128, n: u8 };
+    const rec = Rec{ .id = 0x3d6f4f0e_7b1c_4a8e_9c2d_5e6f7a8b9c0d, .n = 1 };
+
+    const tree = try toValue(a, rec, .{});
+    defer freeValue(a, tree);
+    try std.testing.expect(tree == .obj);
+    try std.testing.expectEqualStrings("id", tree.obj[0].k);
+    try std.testing.expectEqualStrings("81660856151831056012349132679412423693", tree.obj[0].v.num.lexeme);
+
+    const direct = try encode(a, rec, .{});
+    defer a.free(direct);
+    try std.testing.expectEqualStrings("{\"id\":81660856151831056012349132679412423693,\"n\":1}", direct);
+    const via_tree = try encode(a, tree, .{});
+    defer a.free(via_tree);
+    try std.testing.expectEqualStrings(direct, via_tree);
 }
 
 test "encode escape non-ascii" {
