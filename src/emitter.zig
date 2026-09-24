@@ -169,18 +169,24 @@ pub fn Encoder(comptime WriterType: type) type {
         /// express, are written as null, as encode() writes them by default.
         pub fn writeFloat(self: *Self, value: anytype) Error!void {
             try self.writeCommaIfNeeded();
-            // SONNY-2417: classify in the value's own type (comptime_float as
-            // f128) and render with encode()'s formatter, so a streamed float
-            // is byte-for-byte what encode() writes at every width. Narrowing
-            // to f64 wrote null for finite f80/f128 above floatMax(f64), and
-            // "{d}" printed the invalid literal "(float)" for f80/f128
-            // decimals longer than 347 bytes.
-            const f = if (@TypeOf(value) == comptime_float) @as(f128, value) else value;
-            if (std.math.isNan(f) or std.math.isInf(f)) {
-                try self.writer.writeAll("null");
+            if (@TypeOf(value) == comptime_int) {
+                // SONNY-2417: an integer literal has no NaN/Inf to classify;
+                // it streams as its exact digits with "{d}", as in v0.1.16.
+                try self.writer.print("{d}", .{value});
             } else {
-                var buf: [encode_mod.float_lexeme_buf_len]u8 = undefined;
-                try self.writer.writeAll(encode_mod.renderFloatLexeme(&buf, value));
+                // SONNY-2417: classify in the value's own type (comptime_float
+                // as f128) and render with encode()'s formatter, so a streamed
+                // float is byte-for-byte what encode() writes at every width.
+                // Narrowing to f64 wrote null for finite f80/f128 above
+                // floatMax(f64), and "{d}" printed the invalid literal
+                // "(float)" for f80/f128 decimals longer than 347 bytes.
+                const f = if (@TypeOf(value) == comptime_float) @as(f128, value) else value;
+                if (std.math.isNan(f) or std.math.isInf(f)) {
+                    try self.writer.writeAll("null");
+                } else {
+                    var buf: [encode_mod.float_lexeme_buf_len]u8 = undefined;
+                    try self.writer.writeAll(encode_mod.renderFloatLexeme(&buf, value));
+                }
             }
             self.markNotFirst();
         }
