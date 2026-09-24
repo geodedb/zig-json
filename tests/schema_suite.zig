@@ -19,6 +19,25 @@ const Tally = struct {
 /// Totals for the whole suite run, printed by the summary test.
 var tally: Tally = .{};
 
+/// SONNY-2426: the only groups allowed to skip. At the suite commit
+/// scripts/fetch-json-schema-test-suite.sh pins (fe8c2f0), these five cases
+/// are the ones whose schemas do not compile: their regexes use Unicode
+/// property escapes (\p{...}), which the regex engine does not support. Any
+/// other group whose schema fails to compile fails its file, so a compile
+/// regression cannot pass as a wave of skips. Bumping the pin means
+/// revisiting this list.
+const known_skips = [_]struct { file: []const u8, group: []const u8 }{
+    .{ .file = "pattern.json", .group = "pattern with Unicode property escape requires unicode mode" }, // 3 cases
+    .{ .file = "patternProperties.json", .group = "patternProperties with Unicode property escape" }, // 2 cases
+};
+
+fn isKnownSkip(file: []const u8, group: []const u8) bool {
+    for (known_skips) |known| {
+        if (std.mem.eql(u8, known.file, file) and std.mem.eql(u8, known.group, group)) return true;
+    }
+    return false;
+}
+
 /// Print a runner message to `out`, or to stderr when `out` is null.
 fn printTo(out: ?*std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
     if (out) |w| {
@@ -88,8 +107,9 @@ fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
 ///
 /// SONNY-2426: any failing case, including a validation error, fails the file
 /// with error.SchemaSuiteCaseFailed once every case has run and been reported,
-/// so the test-schema step exits non-zero. A group whose schema does not
-/// compile is counted as skipped and does not fail the file.
+/// so the test-schema step exits non-zero. Only a group listed in known_skips
+/// may skip; any other schema that fails to compile, and any malformed group or
+/// case, counts as failed and is reported.
 fn runSuiteText(allocator: std.mem.Allocator, t: *Tally, out: ?*std.Io.Writer, filename: []const u8, content: []const u8) !void {
     var err = json.ParseError.init();
     var suite_doc = json.parse(allocator, content, .{}, &err) catch |e| {
@@ -108,36 +128,47 @@ fn runSuiteText(allocator: std.mem.Allocator, t: *Tally, out: ?*std.Io.Writer, f
 
     for (groups) |group| {
         const group_desc = getStr(group, "description") orelse "unknown";
-        const schema_value = getObj(group, "schema") orelse continue;
-        const tests_arr = getArr(group, "tests") orelse continue;
+        const schema_value = getObj(group, "schema");
+        const tests_arr = getArr(group, "tests");
+        if (schema_value == null or tests_arr == null) {
+            printTo(out, "FAIL [{s}] {s}: malformed group (no \"schema\" or \"tests\")\n", .{ filename, group_desc });
+            t.total += 1;
+            t.failed += 1;
+            continue;
+        }
+        const cases = tests_arr.?;
 
         // Compile the schema - we don't need the arena since compileSchema only uses doc.root
         var schema_doc = json.Document{
-            .root = schema_value,
+            .root = schema_value.?,
             .arena = undefined,
         };
 
         var schema_err = json.ParseError.init();
-        var compiled = json.compileSchema(allocator, &schema_doc, .{}, metaschema_resolver, &schema_err) catch {
-            // Some schemas are intentionally invalid or use features we don't support
-            for (tests_arr) |_| {
-                t.skipped += 1;
-                t.total += 1;
+        var compiled = json.compileSchema(allocator, &schema_doc, .{}, metaschema_resolver, &schema_err) catch |e| {
+            t.total += cases.len;
+            if (isKnownSkip(filename, group_desc)) {
+                t.skipped += cases.len;
+            } else {
+                printTo(out, "FAIL [{s}] {s}: schema did not compile ({s}) and is not a known skip\n", .{ filename, group_desc, @errorName(e) });
+                t.failed += cases.len;
             }
             continue;
         };
         defer compiled.deinit();
 
-        for (tests_arr) |test_case| {
+        for (cases) |test_case| {
             t.total += 1;
 
             const test_desc = getStr(test_case, "description") orelse "unknown";
             const data = getVal(test_case, "data") orelse {
-                t.skipped += 1;
+                printTo(out, "FAIL [{s}] {s} / {s}: malformed case (no \"data\")\n", .{ filename, group_desc, test_desc });
+                t.failed += 1;
                 continue;
             };
             const expected_valid = getBool(test_case, "valid") orelse {
-                t.skipped += 1;
+                printTo(out, "FAIL [{s}] {s} / {s}: malformed case (no \"valid\")\n", .{ filename, group_desc, test_desc });
+                t.failed += 1;
                 continue;
             };
 
