@@ -850,3 +850,22 @@ test "SONNY-2417 streaming: writeFloat matches encode byte-for-byte for every fl
         try std.testing.expectEqualStrings(encoded, streamed);
     }
 }
+
+// SONNY-2417: writeFloat accepted integer literals in v0.1.16 and streamed them
+// with "{d}" as their exact digits. Classifying NaN/Inf in the value's own type
+// handed a comptime_int to std.math.isInf, and these calls stopped compiling.
+// Pin the v0.1.16 output.
+test "SONNY-2417 streaming: writeFloat of integer literals streams their exact digits" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    var enc = encoder(std.testing.allocator, &aw.writer, .{});
+    defer enc.deinit();
+
+    try enc.beginArray();
+    try enc.writeFloat(0);
+    try enc.writeFloat(-7);
+    try enc.writeFloat(123456789012345678901234567890);
+    try enc.endArray();
+
+    try std.testing.expectEqualStrings("[0,-7,123456789012345678901234567890]", aw.written());
+}
