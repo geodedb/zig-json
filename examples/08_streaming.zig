@@ -22,8 +22,10 @@ pub fn main() !void {
         \\{"name": "Alice", "age": 30, "tags": ["dev", "zig"]}
     ;
 
-    // Create a tokenizer
+    // Create a tokenizer. It keeps one scratch buffer for decoded strings
+    // across next()/peek()/readValue(); deinit() frees it.
     var tokenizer = json.Tokenizer.init(allocator, sample_json, .{});
+    defer tokenizer.deinit();
 
     std.debug.print("  Tokens in document:\n", .{});
     while (true) {
@@ -44,6 +46,7 @@ pub fn main() !void {
     std.debug.print("\n=== 2. Read Values from Tokenizer ===\n", .{});
 
     var tokenizer2 = json.Tokenizer.init(allocator, sample_json, .{});
+    defer tokenizer2.deinit();
 
     // Read the entire value as a json.Value tree
     const value = try json.readValue(&tokenizer2);
@@ -130,6 +133,7 @@ pub fn main() !void {
     ;
 
     var arr_tokenizer = json.Tokenizer.init(allocator, large_array, .{});
+    defer arr_tokenizer.deinit();
 
     // Skip the opening bracket
     const first_token = try arr_tokenizer.next();
