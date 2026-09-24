@@ -9,10 +9,24 @@ const suite_path = "testdata/JSON-Schema-Test-Suite/tests/draft2020-12/";
 const metaschema_path = "testdata/metaschema/";
 
 // Test result tracking
-var total_tests: usize = 0;
-var passed_tests: usize = 0;
-var failed_tests: usize = 0;
-var skipped_tests: usize = 0;
+const Tally = struct {
+    total: usize = 0,
+    passed: usize = 0,
+    failed: usize = 0,
+    skipped: usize = 0,
+};
+
+/// Totals for the whole suite run, printed by the summary test.
+var tally: Tally = .{};
+
+/// Print a runner message to `out`, or to stderr when `out` is null.
+fn printTo(out: ?*std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
+    if (out) |w| {
+        w.print(fmt, args) catch {};
+    } else {
+        std.debug.print(fmt, args);
+    }
+}
 
 // Metaschema resolver - maps URIs to local files
 const MetaschemaResolver = struct {
@@ -66,9 +80,15 @@ fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     };
     defer allocator.free(content);
 
+    return runSuiteText(allocator, &tally, null, filename, content);
+}
+
+/// Run every case in one suite file's JSON text, adding the results to `t` and
+/// reporting failing cases to `out` (stderr when null).
+fn runSuiteText(allocator: std.mem.Allocator, t: *Tally, out: ?*std.Io.Writer, filename: []const u8, content: []const u8) !void {
     var err = json.ParseError.init();
     var suite_doc = json.parse(allocator, content, .{}, &err) catch |e| {
-        std.debug.print("Failed to parse test file {s}: {}\n", .{ filename, e });
+        printTo(out, "Failed to parse test file {s}: {}\n", .{ filename, e });
         return e;
     };
     defer suite_doc.deinit();
@@ -91,29 +111,29 @@ fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
         var compiled = json.compileSchema(allocator, &schema_doc, .{}, metaschema_resolver, &schema_err) catch {
             // Some schemas are intentionally invalid or use features we don't support
             for (tests_arr) |_| {
-                skipped_tests += 1;
-                total_tests += 1;
+                t.skipped += 1;
+                t.total += 1;
             }
             continue;
         };
         defer compiled.deinit();
 
         for (tests_arr) |test_case| {
-            total_tests += 1;
+            t.total += 1;
 
             const test_desc = getStr(test_case, "description") orelse "unknown";
             const data = getVal(test_case, "data") orelse {
-                skipped_tests += 1;
+                t.skipped += 1;
                 continue;
             };
             const expected_valid = getBool(test_case, "valid") orelse {
-                skipped_tests += 1;
+                t.skipped += 1;
                 continue;
             };
 
             const report = json.validate(allocator, &compiled, data, .{}) catch |e| {
-                std.debug.print("FAIL [{s}] {s} / {s}: validation error {}\n", .{ filename, group_desc, test_desc, e });
-                failed_tests += 1;
+                printTo(out, "FAIL [{s}] {s} / {s}: validation error {}\n", .{ filename, group_desc, test_desc, e });
+                t.failed += 1;
                 continue;
             };
             defer {
@@ -129,10 +149,10 @@ fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
             const actual_valid = report.ok;
 
             if (actual_valid == expected_valid) {
-                passed_tests += 1;
+                t.passed += 1;
             } else {
-                std.debug.print("FAIL [{s}] {s} / {s}: expected valid={}, got valid={}\n", .{ filename, group_desc, test_desc, expected_valid, actual_valid });
-                failed_tests += 1;
+                printTo(out, "FAIL [{s}] {s} / {s}: expected valid={}, got valid={}\n", .{ filename, group_desc, test_desc, expected_valid, actual_valid });
+                t.failed += 1;
             }
         }
     }
@@ -369,6 +389,57 @@ test "schema suite: boolean_schema" {
 }
 
 // ============================================================
+// Runner self-test
+// ============================================================
+
+// SONNY-2426: the runner's own pass/fail logic. A failing case used to be
+// counted and printed but never failed anything, so `zig build test-schema`
+// (and test-all) exited 0 with "Failed: 1" in the summary. This runs on
+// in-memory suite files, so it needs no fetched fixtures, keeps its own tally,
+// and reports into a buffer (a passing run stays silent).
+test "schema suite runner: a failing case fails the file; skipped groups do not" {
+    const a = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+
+    // One case passes and one has a flipped expectation: the file fails, and
+    // the failing case is reported.
+    const flipped =
+        \\[{"description": "integers", "schema": {"type": "integer"}, "tests": [
+        \\  {"description": "1 is an integer", "data": 1, "valid": true},
+        \\  {"description": "flipped", "data": 1, "valid": false}]}]
+    ;
+    var t: Tally = .{};
+    try std.testing.expectError(error.SchemaSuiteCaseFailed, runSuiteText(a, &t, &out.writer, "self-test.json", flipped));
+    try std.testing.expectEqual(Tally{ .total = 2, .passed = 1, .failed = 1 }, t);
+    try std.testing.expectEqualStrings(
+        "FAIL [self-test.json] integers / flipped: expected valid=false, got valid=true\n",
+        out.written(),
+    );
+
+    // A group whose schema does not compile is skipped, like the suite's two
+    // Unicode property-escape groups; skips do not fail the file.
+    const uncompilable =
+        \\[{"description": "invalid regex", "schema": {"pattern": "("}, "tests": [
+        \\  {"description": "a", "data": "a", "valid": true},
+        \\  {"description": "b", "data": "b", "valid": true}]},
+        \\ {"description": "integers", "schema": {"type": "integer"}, "tests": [
+        \\  {"description": "1 is an integer", "data": 1, "valid": true}]}]
+    ;
+    out.clearRetainingCapacity();
+    t = .{};
+    try runSuiteText(a, &t, &out.writer, "self-test.json", uncompilable);
+    try std.testing.expectEqual(Tally{ .total = 3, .passed = 1, .skipped = 2 }, t);
+    try std.testing.expectEqualStrings("", out.written());
+
+    // A file that is not an array of groups is an error, not a silent pass.
+    out.clearRetainingCapacity();
+    t = .{};
+    try std.testing.expectError(error.InvalidSuiteFile, runSuiteText(a, &t, &out.writer, "self-test.json", "{}"));
+    try std.testing.expectEqual(Tally{}, t);
+}
+
+// ============================================================
 // Summary (runs last)
 // ============================================================
 
@@ -386,20 +457,20 @@ fn verboseRequested() bool {
 // prints when a case failed (each failure has already printed its FAIL line)
 // or when JSON_SCHEMA_SUITE_VERBOSE=1 asks for it.
 test "schema suite: summary" {
-    if (failed_tests == 0 and !verboseRequested()) return;
+    if (tally.failed == 0 and !verboseRequested()) return;
 
     std.debug.print("\n========================================\n", .{});
     std.debug.print("JSON Schema Test Suite Results:\n", .{});
-    std.debug.print("  Total:   {}\n", .{total_tests});
-    std.debug.print("  Passed:  {}\n", .{passed_tests});
-    std.debug.print("  Failed:  {}\n", .{failed_tests});
-    std.debug.print("  Skipped: {}\n", .{skipped_tests});
+    std.debug.print("  Total:   {}\n", .{tally.total});
+    std.debug.print("  Passed:  {}\n", .{tally.passed});
+    std.debug.print("  Failed:  {}\n", .{tally.failed});
+    std.debug.print("  Skipped: {}\n", .{tally.skipped});
     std.debug.print("========================================\n", .{});
 
     // Allow some failures for unsupported features
     // but fail if pass rate drops below 80%
-    if (total_tests > 0) {
-        const pass_rate = @as(f64, @floatFromInt(passed_tests)) / @as(f64, @floatFromInt(total_tests - skipped_tests));
+    if (tally.total > 0) {
+        const pass_rate = @as(f64, @floatFromInt(tally.passed)) / @as(f64, @floatFromInt(tally.total - tally.skipped));
         std.debug.print("  Pass rate: {d:.1}%\n", .{pass_rate * 100});
     }
 }
