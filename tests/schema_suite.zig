@@ -57,10 +57,10 @@ fn runTestFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ suite_path, filename }) catch return;
 
     const content = readTestFile(allocator, path) catch |e| {
-        // The official JSON-Schema-Test-Suite is fetched out-of-band (CI clones
-        // it; see .gitlab-ci.yml). When it is absent locally, skip rather than
-        // fail so `zig build test-all` is green without the external checkout.
-        if (e == error.FileNotFound) return error.SkipZigTest;
+        // SONNY-2426: a missing file fails; it is not skipped. The suite is
+        // fetched, not vendored (scripts/fetch-json-schema-test-suite.sh), and
+        // build.zig refuses to run test-schema without it. Skipping here let
+        // test-all pass with a vacuous "Total: 0".
         std.debug.print("Failed to read test file {s}: {}\n", .{ filename, e });
         return e;
     };

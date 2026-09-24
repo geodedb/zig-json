@@ -137,7 +137,21 @@ pub fn build(b: *std.Build) void {
     const run_schema_suite_tests = b.addRunArtifact(schema_suite_tests);
 
     const schema_suite_step = b.step("test-schema", "Run JSON Schema test suite");
-    schema_suite_step.dependOn(&run_schema_suite_tests.step);
+    // SONNY-2426: the suite is fetched, not vendored. Without it every suite
+    // test used to skip, and test-schema (so test-all) passed with a vacuous
+    // "Total: 0" summary shown under a "failed command:" label. Fail instead,
+    // naming the fetch command.
+    if (b.build_root.handle.access(b.graph.io, "testdata/JSON-Schema-Test-Suite/tests/draft2020-12", .{})) |_| {
+        schema_suite_step.dependOn(&run_schema_suite_tests.step);
+    } else |_| {
+        const missing = b.addFail(
+            \\testdata/JSON-Schema-Test-Suite/tests/draft2020-12 not found.
+            \\The JSON Schema Test Suite is fetched, not vendored. Fetch the commit CI pins, then rerun:
+            \\  scripts/fetch-json-schema-test-suite.sh
+        );
+        missing.step.name = "check JSON-Schema-Test-Suite";
+        schema_suite_step.dependOn(&missing.step);
+    }
 
     // ============================================================
     // All Tests
