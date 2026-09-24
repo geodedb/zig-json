@@ -406,10 +406,10 @@ test "schema suite: boolean_schema" {
 
 // SONNY-2426: the runner's own pass/fail logic. A failing case used to be
 // counted and printed but never failed anything, so `zig build test-schema`
-// (and test-all) exited 0 with "Failed: 1" in the summary. This runs on
-// in-memory suite files, so it needs no fetched fixtures, keeps its own tally,
-// and reports into a buffer (a passing run stays silent).
-test "schema suite runner: a failing case fails the file; skipped groups do not" {
+// (and test-all) exited 0 with "Failed: 1" in the summary. These run on
+// in-memory suite files, so they need no fetched fixtures, keep their own
+// tally, and report into a buffer (a passing run stays silent).
+test "schema suite runner: a failing case fails the file" {
     const a = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(a);
     defer out.deinit();
@@ -429,26 +429,71 @@ test "schema suite runner: a failing case fails the file; skipped groups do not"
         out.written(),
     );
 
-    // A group whose schema does not compile is skipped, like the suite's two
-    // Unicode property-escape groups; skips do not fail the file.
-    const uncompilable =
+    // A file that is not an array of groups is an error, not a silent pass.
+    out.clearRetainingCapacity();
+    t = .{};
+    try std.testing.expectError(error.InvalidSuiteFile, runSuiteText(a, &t, &out.writer, "self-test.json", "{}"));
+    try std.testing.expectEqual(Tally{}, t);
+}
+
+// SONNY-2426: skips are pinned. Every group whose schema failed to compile
+// used to count as skipped, without limit, so a compile regression passed in
+// silence: with minContains broken, the suite reported Skipped 38 (from 5),
+// Passed 821 (from 854), 14/14 steps, exit 0. Only the groups listed in
+// known_skips may skip. Any other schema that fails to compile, and any
+// malformed group or case, fails the file and is reported.
+test "schema suite runner: only the pinned skips may skip" {
+    const a = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+
+    // A schema that fails to compile (an invalid regex) in a group that is not
+    // a known skip fails the file; its cases count as failed.
+    const unexpected =
         \\[{"description": "invalid regex", "schema": {"pattern": "("}, "tests": [
         \\  {"description": "a", "data": "a", "valid": true},
         \\  {"description": "b", "data": "b", "valid": true}]},
         \\ {"description": "integers", "schema": {"type": "integer"}, "tests": [
         \\  {"description": "1 is an integer", "data": 1, "valid": true}]}]
     ;
+    var t: Tally = .{};
+    try std.testing.expectError(error.SchemaSuiteCaseFailed, runSuiteText(a, &t, &out.writer, "self-test.json", unexpected));
+    try std.testing.expectEqual(Tally{ .total = 3, .passed = 1, .failed = 2 }, t);
+    try std.testing.expectEqualStrings(
+        "FAIL [self-test.json] invalid regex: schema did not compile (JsonParse) and is not a known skip\n",
+        out.written(),
+    );
+
+    // The same failure under a pinned file and group description is a known
+    // skip: counted as skipped, not failed, and silent.
+    const pinned =
+        \\[{"description": "pattern with Unicode property escape requires unicode mode",
+        \\  "schema": {"pattern": "("}, "tests": [
+        \\  {"description": "a", "data": "a", "valid": true}]}]
+    ;
     out.clearRetainingCapacity();
     t = .{};
-    try runSuiteText(a, &t, &out.writer, "self-test.json", uncompilable);
-    try std.testing.expectEqual(Tally{ .total = 3, .passed = 1, .skipped = 2 }, t);
+    try runSuiteText(a, &t, &out.writer, "pattern.json", pinned);
+    try std.testing.expectEqual(Tally{ .total = 1, .skipped = 1 }, t);
     try std.testing.expectEqualStrings("", out.written());
 
-    // A file that is not an array of groups is an error, not a silent pass.
+    // Malformed groups and cases cannot drop out quietly either.
+    const malformed =
+        \\[{"description": "no tests", "schema": {"type": "integer"}},
+        \\ {"description": "integers", "schema": {"type": "integer"}, "tests": [
+        \\  {"description": "no expectation", "data": 1},
+        \\  {"description": "no data", "valid": true}]}]
+    ;
     out.clearRetainingCapacity();
     t = .{};
-    try std.testing.expectError(error.InvalidSuiteFile, runSuiteText(a, &t, &out.writer, "self-test.json", "{}"));
-    try std.testing.expectEqual(Tally{}, t);
+    try std.testing.expectError(error.SchemaSuiteCaseFailed, runSuiteText(a, &t, &out.writer, "self-test.json", malformed));
+    try std.testing.expectEqual(Tally{ .total = 3, .failed = 3 }, t);
+    try std.testing.expectEqualStrings(
+        "FAIL [self-test.json] no tests: malformed group (no \"schema\" or \"tests\")\n" ++
+            "FAIL [self-test.json] integers / no expectation: malformed case (no \"valid\")\n" ++
+            "FAIL [self-test.json] integers / no data: malformed case (no \"data\")\n",
+        out.written(),
+    );
 }
 
 // ============================================================
