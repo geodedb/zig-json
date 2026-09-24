@@ -1390,18 +1390,25 @@ fn freeInternal(comptime T: type, allocator: std.mem.Allocator, value: *T) void 
 
     switch (info) {
         .pointer => |ptr| {
+            // SONNY-2443: a []const T or *const T field only promises that
+            // callers will not write through it. freeInternal frees memory that
+            // unmarshal itself allocated as mutable (allocator.alloc/create) and
+            // then filled in, so dropping the const to free what it points to is
+            // sound. Without the casts no struct with such a field could be
+            // unmarshaled at all: json.free and the ASR-011 cleanup instantiate
+            // this for every field.
             switch (ptr.size) {
                 .slice => {
                     if (ptr.child != u8) {
                         // Free nested allocations in slice elements
                         for (value.*) |*item| {
-                            freeInternal(ptr.child, allocator, item);
+                            freeInternal(ptr.child, allocator, @constCast(item));
                         }
                     }
                     allocator.free(value.*);
                 },
                 .one => {
-                    freeInternal(ptr.child, allocator, value.*);
+                    freeInternal(ptr.child, allocator, @constCast(value.*));
                     allocator.destroy(value.*);
                 },
                 else => {},
