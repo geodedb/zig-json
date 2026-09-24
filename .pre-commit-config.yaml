@@ -145,7 +145,8 @@ repos:
       # Check for TODO/FIXME in committed code (warning only). -w matches whole
       # words only, so \uXXXX / U+XXXX escape notation is not a marker. Paths are
       # NUL-delimited (names with spaces), staged deletions are skipped, this
-      # file (whose pattern spells the markers out) is excluded, and the warning
+      # file (whose pattern spells the markers out) is excluded, `--` ends grep's
+      # options (a file named like -n.zig is read as a file), and the warning
       # keys off grep's matches, not its exit status (SONNY-2426).
   - id: check-todos
     name: check for TODOs/FIXMEs
@@ -153,7 +154,7 @@ repos:
     args:
     - -c
     - |
-      files=$(git diff --cached -z --name-only --diff-filter=d -- . ':(exclude).pre-commit-config.yaml' | xargs -0 -r grep -l -w -E "(TODO|FIXME|XXX|HACK)" 2>/dev/null)
+      files=$(git diff --cached -z --name-only --diff-filter=d -- . ':(exclude).pre-commit-config.yaml' | xargs -0 -r grep -l -w -E "(TODO|FIXME|XXX|HACK)" -- 2>/dev/null)
       if [ -n "$files" ]; then printf '%s\n' "$files"; echo "Warning: Found TODO/FIXME markers in staged files"; fi
       exit 0
     language: system
