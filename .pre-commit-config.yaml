@@ -142,14 +142,15 @@ repos:
     pass_filenames: false
     stages: [pre-push]      # Only on push, may be slow
 
-      # Check for TODO/FIXME in committed code (warning only)
+      # Check for TODO/FIXME in committed code (warning only). -w matches whole
+      # words only, so \uXXXX / U+XXXX escape notation is not a marker (SONNY-2426).
   - id: check-todos
     name: check for TODOs/FIXMEs
     entry: bash
     args:
     - -c
     - |
-      git diff --cached --name-only | xargs grep -l -E "(TODO|FIXME|XXX|HACK)" 2>/dev/null && echo "Warning: Found TODO/FIXME markers in staged files" && exit 0 || exit 0
+      git diff --cached --name-only | xargs grep -l -w -E "(TODO|FIXME|XXX|HACK)" 2>/dev/null && echo "Warning: Found TODO/FIXME markers in staged files" && exit 0 || exit 0
     language: system
     pass_filenames: false
     verbose: true
