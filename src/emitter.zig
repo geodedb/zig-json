@@ -12,6 +12,7 @@
 const std = @import("std");
 const json = @import("json.zig");
 const unicode = @import("unicode.zig");
+const encode_mod = @import("encode.zig");
 
 const Value = json.Value;
 const Member = json.Member;
@@ -164,14 +165,22 @@ pub fn Encoder(comptime WriterType: type) type {
             self.markNotFirst();
         }
 
-        /// Write a float value
+        /// Write a float value. NaN and the infinities, which JSON cannot
+        /// express, are written as null, as encode() writes them by default.
         pub fn writeFloat(self: *Self, value: anytype) Error!void {
             try self.writeCommaIfNeeded();
-            const f: f64 = if (@TypeOf(value) == comptime_float) value else @floatCast(value);
+            // SONNY-2417: classify in the value's own type (comptime_float as
+            // f128) and render with encode()'s formatter, so a streamed float
+            // is byte-for-byte what encode() writes at every width. Narrowing
+            // to f64 wrote null for finite f80/f128 above floatMax(f64), and
+            // "{d}" printed the invalid literal "(float)" for f80/f128
+            // decimals longer than 347 bytes.
+            const f = if (@TypeOf(value) == comptime_float) @as(f128, value) else value;
             if (std.math.isNan(f) or std.math.isInf(f)) {
                 try self.writer.writeAll("null");
             } else {
-                try self.writer.print("{d}", .{value});
+                var buf: [encode_mod.float_lexeme_buf_len]u8 = undefined;
+                try self.writer.writeAll(encode_mod.renderFloatLexeme(&buf, value));
             }
             self.markNotFirst();
         }

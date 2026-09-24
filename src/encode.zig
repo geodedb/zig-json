@@ -552,11 +552,12 @@ fn encodeInt(writer: anytype, value: anytype, stringify: bool) !void {
 /// SONNY-2405: size of the buffer renderFloatLexeme renders into. It is the
 /// bound std.Io.Writer.printFloat itself uses for "{d}": the longest decimal
 /// rendering of any f64 (std.fmt.float.bufferSize(.decimal, f64) == 347).
-const float_lexeme_buf_len = std.fmt.float.bufferSize(.decimal, f64);
+pub const float_lexeme_buf_len = std.fmt.float.bufferSize(.decimal, f64);
 
 /// SONNY-2405: render a finite float as a JSON number lexeme. encodeFloat
-/// (the writer path) and toValueInternal (the json.Value path) both use it, so
-/// encode(x) and toValue(x) spell every float identically.
+/// (the writer path), toValueInternal (the json.Value path) and, since
+/// SONNY-2417, the streaming Encoder.writeFloat all use it, so encode(x),
+/// toValue(x) and a streamed x spell every float identically.
 ///
 /// Decimal first: whenever "{d}" could render the value (std.Io.Writer renders
 /// "{d}" into this same 347-byte bound), the result is byte-for-byte that text,
@@ -570,7 +571,7 @@ const float_lexeme_buf_len = std.fmt.float.bufferSize(.decimal, f64);
 /// characters. "{d}" printed the invalid literal "(float)" for those, so they now
 /// use shortest round-trip scientific notation ("3.3621031431120935063e-4932"),
 /// which fits in std.fmt.float.min_buffer_size (53) bytes for every float type.
-fn renderFloatLexeme(buf: *[float_lexeme_buf_len]u8, value: anytype) []const u8 {
+pub fn renderFloatLexeme(buf: *[float_lexeme_buf_len]u8, value: anytype) []const u8 {
     return std.fmt.float.render(buf, value, .{ .mode = .decimal }) catch
         // Scientific mode without a precision cannot fail once the buffer holds
         // min_buffer_size bytes (see std.fmt.float.formatScientific).
