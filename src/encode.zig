@@ -1494,6 +1494,82 @@ test "encode floats" {
     try std.testing.expectEqualStrings("null", inf);
 }
 
+// SONNY-2405: a struct with enough fields to exceed the default comptime
+// branch quota (1000) in getSortedFieldIndices's bubble sort. Each of the
+// O(n^2) comparisons calls std.mem.order over the field-name bytes, so cost
+// scales with both field count AND name length; 24 realistic ~20-byte field
+// names (typical of a benchmark-result-style struct) blows well past the
+// default quota with no @setEvalBranchQuota set. This is a *compile-time*
+// regression, not a runtime panic: today, this test fails to compile at all.
+// (24 short single-word field names do NOT reproduce this — calibrated with
+// a standalone probe against this exact Zig 0.16.0 toolchain.)
+test "SONNY-2405: encode wide struct (24 mixed fields) with deterministic sorting round-trips" {
+    const Wide = struct {
+        scenario_name_field: i32 = 0,
+        duration_nanoseconds: []const u8 = "duration_nanoseconds",
+        iteration_count_val: bool = false,
+        mean_latency_ns_val: f64 = 3.25,
+        median_latency_ns_v: i32 = 40,
+        stddev_latency_ns_v: []const u8 = "stddev_latency_ns_v",
+        minimum_latency_val: bool = true,
+        maximum_latency_val: f64 = 7.25,
+        p50_latency_ns_val_: i32 = 80,
+        p95_latency_ns_val_: []const u8 = "p95_latency_ns_val_",
+        p99_latency_ns_val_: bool = false,
+        throughput_ops_sec_: f64 = 11.25,
+        allocations_count_v: i32 = 120,
+        bytes_allocated_val: []const u8 = "bytes_allocated_val",
+        gc_pause_time_ns_v_: bool = true,
+        cpu_utilization_pct: f64 = 15.25,
+        memory_peak_bytes_v: i32 = 160,
+        cache_hit_ratio_val: []const u8 = "cache_hit_ratio_val",
+        error_count_total_v: bool = false,
+        warning_count_val_v: f64 = 19.25,
+        retry_count_total_v: i32 = 200,
+        timeout_count_val_v: []const u8 = "timeout_count_val_v",
+        success_rate_pct_v_: bool = true,
+        baseline_delta_pct_: f64 = 23.25,
+    };
+
+    const w = Wide{};
+    const s = try encode(std.testing.allocator, w, .{ .deterministic = true });
+    defer std.testing.allocator.free(s);
+
+    var perr = json.ParseError.init();
+    var doc = try json.parse(std.testing.allocator, s, .{}, &perr);
+    defer doc.deinit();
+
+    try std.testing.expect(doc.root == .obj);
+    try std.testing.expectEqual(@as(usize, 24), doc.root.obj.len);
+
+    // Deterministic sort must produce strictly increasing key order.
+    var i: usize = 1;
+    while (i < doc.root.obj.len) : (i += 1) {
+        try std.testing.expect(std.mem.order(u8, doc.root.obj[i - 1].k, doc.root.obj[i].k) == .lt);
+    }
+
+    // Independently compute the expected alphabetical order at *runtime*
+    // (std.mem.sort, not comptime, so this oracle is not subject to the same
+    // branch quota as the code under test) and compare it against the full
+    // parsed key order, field by field.
+    var expected = [_][]const u8{
+        "scenario_name_field", "duration_nanoseconds", "iteration_count_val", "mean_latency_ns_val",
+        "median_latency_ns_v", "stddev_latency_ns_v",  "minimum_latency_val", "maximum_latency_val",
+        "p50_latency_ns_val_", "p95_latency_ns_val_",  "p99_latency_ns_val_", "throughput_ops_sec_",
+        "allocations_count_v", "bytes_allocated_val",  "gc_pause_time_ns_v_", "cpu_utilization_pct",
+        "memory_peak_bytes_v", "cache_hit_ratio_val",  "error_count_total_v", "warning_count_val_v",
+        "retry_count_total_v", "timeout_count_val_v",  "success_rate_pct_v_", "baseline_delta_pct_",
+    };
+    std.mem.sort([]const u8, &expected, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    for (doc.root.obj, 0..) |m, idx| {
+        try std.testing.expectEqualStrings(expected[idx], m.k);
+    }
+}
+
 test "encode string" {
     const s = try encode(std.testing.allocator, "hello", .{});
     defer std.testing.allocator.free(s);
@@ -1635,6 +1711,80 @@ test "toValue struct" {
 
     try std.testing.expect(v == .obj);
     try std.testing.expectEqual(@as(usize, 2), v.obj.len);
+}
+
+// SONNY-2405: toValue's float lexeme is built with std.fmt.bufPrint into a
+// fixed 32-byte buffer using the "{d}" (fixed decimal) specifier, then
+// `catch unreachable`s NoSpaceLeft. "{d}" on floats never uses scientific
+// notation, so its length is unbounded by magnitude: floatMax(f64) needs
+// 309 decimal digits and floatTrueMin(f64) needs 326 (std.fmt.float.
+// bufferSize(.decimal, f64) == 347). Both panic today.
+test "SONNY-2405: toValue of extreme f64 magnitudes produces valid JSON numbers (no panic)" {
+    const values = [_]f64{
+        std.math.floatMax(f64),
+        -std.math.floatMax(f64),
+        std.math.floatTrueMin(f64),
+        1e308,
+    };
+
+    for (values) |v| {
+        // toValue: builds a Value tree directly; this is the path that panics today.
+        const val = try toValue(std.testing.allocator, v, .{});
+        defer freeValue(std.testing.allocator, val);
+        try std.testing.expect(val == .num);
+        const round_tripped = try std.fmt.parseFloat(f64, val.num.lexeme);
+        try std.testing.expectEqual(v, round_tripped);
+
+        // encode (writer path) is not affected (std.Io.Writer sizes its own
+        // scratch space per type), but is pinned here alongside the toValue
+        // fix so the two paths can't silently diverge.
+        const s = try encode(std.testing.allocator, v, .{});
+        defer std.testing.allocator.free(s);
+        const s_round_tripped = try std.fmt.parseFloat(f64, s);
+        try std.testing.expectEqual(v, s_round_tripped);
+
+        // The encoded text must itself be valid, parseable JSON.
+        var perr = json.ParseError.init();
+        var doc = try json.parse(std.testing.allocator, s, .{}, &perr);
+        defer doc.deinit();
+        try std.testing.expect(doc.root == .num);
+        const doc_round_tripped = try std.fmt.parseFloat(f64, doc.root.num.lexeme);
+        try std.testing.expectEqual(v, doc_round_tripped);
+    }
+}
+
+// SONNY-2405: pin the existing NaN/Infinity policy so the buffer/format fix
+// above cannot change it. Per EncodeOptions.allow_nan_infinity: false (the
+// default) maps NaN/+-Inf to JSON null; true maps them to the string
+// sentinels "NaN" / "Infinity" / "-Infinity". Do not change this policy.
+test "SONNY-2405: toValue NaN/Infinity follow the allow_nan_infinity policy unchanged" {
+    {
+        const nan_val = try toValue(std.testing.allocator, std.math.nan(f64), .{});
+        defer freeValue(std.testing.allocator, nan_val);
+        try std.testing.expect(nan_val == .null);
+
+        const inf_val = try toValue(std.testing.allocator, std.math.inf(f64), .{});
+        defer freeValue(std.testing.allocator, inf_val);
+        try std.testing.expect(inf_val == .null);
+
+        const ninf_val = try toValue(std.testing.allocator, -std.math.inf(f64), .{});
+        defer freeValue(std.testing.allocator, ninf_val);
+        try std.testing.expect(ninf_val == .null);
+    }
+    {
+        const nan_val = try toValue(std.testing.allocator, std.math.nan(f64), .{ .allow_nan_infinity = true });
+        defer freeValue(std.testing.allocator, nan_val);
+        try std.testing.expect(nan_val == .str);
+        try std.testing.expectEqualStrings("NaN", nan_val.str);
+
+        const inf_val = try toValue(std.testing.allocator, std.math.inf(f64), .{ .allow_nan_infinity = true });
+        defer freeValue(std.testing.allocator, inf_val);
+        try std.testing.expectEqualStrings("Infinity", inf_val.str);
+
+        const ninf_val = try toValue(std.testing.allocator, -std.math.inf(f64), .{ .allow_nan_infinity = true });
+        defer freeValue(std.testing.allocator, ninf_val);
+        try std.testing.expectEqualStrings("-Infinity", ninf_val.str);
+    }
 }
 
 test "encode escape non-ascii" {
