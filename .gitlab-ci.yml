@@ -3,9 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024-2025 CodePros
 
+# SONNY-2447: "company" alone also matches the hosted Windows runners, where
+# tag-pipeline build and test jobs died with server_timeout_running (so every
+# dependent job, zig-version-tag-check included, was skipped). "linux" keeps
+# every job that sets no tags of its own on Linux runners.
 default:
   tags:
     - company
+    - linux
 
 include:
   # Security scanning
@@ -216,3 +221,20 @@ fuzz:
   allow_failure: true
   needs:
     - build
+
+# =============================================================================
+# Release
+# =============================================================================
+
+# SONNY-2447: create-release (release-semantic component) publishes the GitLab
+# Release with the native `release:` keyword, which the runner executes with
+# glab. glab logs in with the job token but prefers a GITLAB_TOKEN environment
+# variable, and the one the devnw group exports lacks api scope, so every
+# POST .../releases failed with 403 insufficient_scope (no release after
+# v0.1.3). Blank it for this job (same job name, so these keys merge into the
+# component's job) to leave glab on the job token. GitLab gives group and
+# project CI/CD variables precedence over job variables, though: if the 403
+# persists, the group variable has to be scoped away from this job instead.
+create-release:
+  variables:
+    GITLAB_TOKEN: ""
