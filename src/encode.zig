@@ -549,6 +549,34 @@ fn encodeInt(writer: anytype, value: anytype, stringify: bool) !void {
     }
 }
 
+/// SONNY-2405: size of the buffer renderFloatLexeme renders into. It is the
+/// bound std.Io.Writer.printFloat itself uses for "{d}": the longest decimal
+/// rendering of any f64 (std.fmt.float.bufferSize(.decimal, f64) == 347).
+const float_lexeme_buf_len = std.fmt.float.bufferSize(.decimal, f64);
+
+/// SONNY-2405: render a finite float as a JSON number lexeme. encodeFloat
+/// (the writer path) and toValueInternal (the json.Value path) both use it, so
+/// encode(x) and toValue(x) spell every float identically.
+///
+/// Decimal first: whenever "{d}" could render the value (std.Io.Writer renders
+/// "{d}" into this same 347-byte bound), the result is byte-for-byte that text,
+/// which this library has always emitted (3.25 -> "3.25", 2.0 -> "2",
+/// floatMax(f64) -> its 309 digits). Consumers depend on that spelling:
+/// diffPatch compares numbers by lexeme, cborEncode encodes an integral lexeme
+/// as a CBOR integer, and docs/EXAMPLES.md documents it.
+///
+/// Scientific fallback: only f80/f128 (and comptime_float, which is f128)
+/// values can have a longer decimal form; floatMin(f80)'s is over 4,900
+/// characters. "{d}" printed the invalid literal "(float)" for those, so they now
+/// use shortest round-trip scientific notation ("3.3621031431120935063e-4932"),
+/// which fits in std.fmt.float.min_buffer_size (53) bytes for every float type.
+fn renderFloatLexeme(buf: *[float_lexeme_buf_len]u8, value: anytype) []const u8 {
+    return std.fmt.float.render(buf, value, .{ .mode = .decimal }) catch
+        // Scientific mode without a precision cannot fail once the buffer holds
+        // min_buffer_size bytes (see std.fmt.float.formatScientific).
+        std.fmt.float.render(buf, value, .{ .mode = .scientific }) catch unreachable;
+}
+
 fn encodeFloat(writer: anytype, value: anytype, stringify: bool, allow_nan_infinity: bool) !void {
     const T = @TypeOf(value);
 
@@ -578,13 +606,15 @@ fn encodeFloat(writer: anytype, value: anytype, stringify: bool, allow_nan_infin
         }
     }
 
-    // Use Zig's float formatting
+    // SONNY-2405: the formatter shared with toValue (see renderFloatLexeme).
+    var buf: [float_lexeme_buf_len]u8 = undefined;
+    const lexeme = renderFloatLexeme(&buf, value);
     if (stringify) {
         try writer.writeByte('"');
-        try writer.print("{d}", .{value});
+        try writer.writeAll(lexeme);
         try writer.writeByte('"');
     } else {
-        try writer.print("{d}", .{value});
+        try writer.writeAll(lexeme);
     }
 }
 
@@ -727,18 +757,25 @@ fn encodeUnion(writer: anytype, value: anytype, options: EncodeOptions, depth: u
 /// Get sorted field indices for deterministic output (comptime)
 fn getSortedFieldIndices(comptime T: type, comptime info: std.builtin.Type.Struct) [info.fields.len]usize {
     comptime {
-        // SONNY-2405: this is an O(n^2) bubble sort, and every comparison
-        // calls std.mem.order (via getJsonName) over the field-name bytes,
-        // so cost scales with BOTH field count and name length. The default
-        // 1000-branch quota is exceeded by realistic struct sizes: 24 fields
-        // with ~20-byte names (a typical benchmark-result-shaped struct)
-        // already fails; 24 fields sharing a long common prefix (so every
-        // comparison walks nearly the full name) needs ~12,500. This formula
-        // was calibrated against that shared-prefix worst case (24 fields,
-        // 22-byte names, ~12,500 branches needed) and keeps a >10x margin
-        // there; it also degrades gracefully for wider structs because it is
-        // quadratic in the same way the sort itself is.
-        @setEvalBranchQuota(1_000 + info.fields.len * info.fields.len * 256);
+        // SONNY-2405: this is an O(n^2) bubble sort, and each of its
+        // n(n-1)/2 comparisons walks the two JSON names' common prefix with
+        // std.mem.order at about two backward branches per byte, so the
+        // comptime cost scales with fields^2 x name length. json_config
+        // names count (JSON-LD IRIs can be hundreds of bytes). Measured on
+        // Zig 0.16.0 with every name sharing all but its last few bytes (the
+        // worst case), the sort needs about n(n-1)/2 * (2 * longest + 8)
+        // branches: 24 fields x 344-byte names ~191,000, 64 x 300 ~1.2M,
+        // 256 x 40 ~2.8M. The default quota is 1,000, and a bound on the
+        // field count alone undercounts long names. So find the longest name
+        // under a linear budget, then allow n^2 * (4 * longest + 64): at
+        // least 4x the measured need at every size, capped at the u32
+        // maximum @setEvalBranchQuota accepts.
+        const n = info.fields.len;
+        @setEvalBranchQuota(1_000 + 64 * n);
+        var longest: usize = 0;
+        for (info.fields) |field| longest = @max(longest, getJsonName(T, field.name).len);
+        const budget: u64 = 1_000 + @as(u64, n) * n * (4 * longest + 64);
+        @setEvalBranchQuota(@intCast(@min(budget, std.math.maxInt(u32))));
         var indices: [info.fields.len]usize = undefined;
         for (0..info.fields.len) |i| {
             indices[i] = i;
@@ -1162,10 +1199,14 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
         .bool => return .{ .bool = value },
 
         .int, .comptime_int => {
-            // Format integer as string lexeme
-            var buf: [32]u8 = undefined;
-            const lexeme_slice = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
-            const lexeme = try allocator.dupe(u8, lexeme_slice);
+            // SONNY-2405: allocate the lexeme at its exact length. It used to
+            // be formatted into a fixed 32-byte buffer with `catch
+            // unreachable`, which overflowed for 128-bit and wider integers
+            // (maxInt(u128) has 39 digits, minInt(i128) is 40 bytes): a panic
+            // in safe modes, and in ReleaseFast undefined behaviour (observed
+            // as silent truncation to 32 characters, or a hang).
+            const lexeme = try std.fmt.allocPrint(allocator, "{d}", .{value});
+            errdefer allocator.free(lexeme);
             const digits = try normalizeDigits(allocator, lexeme);
             return .{ .num = .{
                 .lexeme = lexeme,
@@ -1194,25 +1235,18 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                 return .null;
             }
             // SONNY-2405: "{d}" (fixed decimal) on a float is unbounded by
-            // magnitude - floatMax(f64) needs 309 digits and
-            // floatTrueMin(f64) needs 326 (std.fmt.float.bufferSize(.decimal,
-            // f64) == 347; f128 needs up to 5011) - so a hardcoded 32-byte
-            // buffer panics (`catch unreachable` on NoSpaceLeft) for large or
-            // tiny magnitudes. Switch to "{e}" (scientific, shortest
-            // round-trip): std.fmt.float.bufferSize(.scientific, T) is
-            // exactly min_buffer_size (53 bytes) for every float type
-            // (f16..f128 and comptime_float), so one small fixed buffer is
-            // safe regardless of T or magnitude. This only changes toValue's
-            // lexeme spelling, not its value: Number is already stored as
-            // sign * digits * 10^exp10 (see number.zig), parseNumber already
-            // parses an 'e'/'E' exponent (JSON numbers allow one, so the
-            // parser must), and the writer-based encode()/encodeToWriter()
-            // path (encodeFloat, below) is untouched and keeps emitting
-            // fixed-decimal via std.Io.Writer, which sizes its own scratch
-            // buffer per type and was never affected by this bug.
-            var buf: [std.fmt.float.min_buffer_size]u8 = undefined;
-            const lexeme_slice = std.fmt.bufPrint(&buf, "{e}", .{value}) catch unreachable;
-            const lexeme = try allocator.dupe(u8, lexeme_slice);
+            // magnitude (floatMax(f64) needs 309 digits, floatTrueMin(f64)
+            // 326), so the old fixed 32-byte buffer panicked (`catch
+            // unreachable` on NoSpaceLeft) for large or tiny magnitudes.
+            // Rendering every float as "{e}" instead would change every
+            // lexeme (1.0 -> "1e0"), which diffPatch, cborEncode and the
+            // documented output all observe. So take the lexeme from
+            // renderFloatLexeme, the formatter encodeFloat uses. toValue(x)
+            // then spells x exactly as encode(x) does: unchanged for every
+            // value that rendered before, and valid for the rest.
+            var buf: [float_lexeme_buf_len]u8 = undefined;
+            const lexeme = try allocator.dupe(u8, renderFloatLexeme(&buf, value));
+            errdefer allocator.free(lexeme);
             const num = try number_mod.parseNumber(lexeme, allocator);
             return .{ .num = .{
                 .lexeme = lexeme,
