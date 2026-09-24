@@ -727,6 +727,18 @@ fn encodeUnion(writer: anytype, value: anytype, options: EncodeOptions, depth: u
 /// Get sorted field indices for deterministic output (comptime)
 fn getSortedFieldIndices(comptime T: type, comptime info: std.builtin.Type.Struct) [info.fields.len]usize {
     comptime {
+        // SONNY-2405: this is an O(n^2) bubble sort, and every comparison
+        // calls std.mem.order (via getJsonName) over the field-name bytes,
+        // so cost scales with BOTH field count and name length. The default
+        // 1000-branch quota is exceeded by realistic struct sizes: 24 fields
+        // with ~20-byte names (a typical benchmark-result-shaped struct)
+        // already fails; 24 fields sharing a long common prefix (so every
+        // comparison walks nearly the full name) needs ~12,500. This formula
+        // was calibrated against that shared-prefix worst case (24 fields,
+        // 22-byte names, ~12,500 branches needed) and keeps a >10x margin
+        // there; it also degrades gracefully for wider structs because it is
+        // quadratic in the same way the sort itself is.
+        @setEvalBranchQuota(1_000 + info.fields.len * info.fields.len * 256);
         var indices: [info.fields.len]usize = undefined;
         for (0..info.fields.len) |i| {
             indices[i] = i;
@@ -1181,8 +1193,25 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                 }
                 return .null;
             }
-            var buf: [32]u8 = undefined;
-            const lexeme_slice = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+            // SONNY-2405: "{d}" (fixed decimal) on a float is unbounded by
+            // magnitude - floatMax(f64) needs 309 digits and
+            // floatTrueMin(f64) needs 326 (std.fmt.float.bufferSize(.decimal,
+            // f64) == 347; f128 needs up to 5011) - so a hardcoded 32-byte
+            // buffer panics (`catch unreachable` on NoSpaceLeft) for large or
+            // tiny magnitudes. Switch to "{e}" (scientific, shortest
+            // round-trip): std.fmt.float.bufferSize(.scientific, T) is
+            // exactly min_buffer_size (53 bytes) for every float type
+            // (f16..f128 and comptime_float), so one small fixed buffer is
+            // safe regardless of T or magnitude. This only changes toValue's
+            // lexeme spelling, not its value: Number is already stored as
+            // sign * digits * 10^exp10 (see number.zig), parseNumber already
+            // parses an 'e'/'E' exponent (JSON numbers allow one, so the
+            // parser must), and the writer-based encode()/encodeToWriter()
+            // path (encodeFloat, below) is untouched and keeps emitting
+            // fixed-decimal via std.Io.Writer, which sizes its own scratch
+            // buffer per type and was never affected by this bug.
+            var buf: [std.fmt.float.min_buffer_size]u8 = undefined;
+            const lexeme_slice = std.fmt.bufPrint(&buf, "{e}", .{value}) catch unreachable;
             const lexeme = try allocator.dupe(u8, lexeme_slice);
             const num = try number_mod.parseNumber(lexeme, allocator);
             return .{ .num = .{
