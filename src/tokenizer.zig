@@ -1136,6 +1136,50 @@ test "readValue number path frees owned digits/lexeme (no leak/double-free)" {
     try std.testing.expectEqual(@as(usize, 3), arr.arr.len);
 }
 
+// SONNY-2425: a Tokenizer keeps one scratch buffer for decoded strings across
+// next(), peek() and readValue(), and only deinit() frees it.
+// examples/08_streaming.zig never called deinit() on its three tokenizers, so
+// each run leaked that buffer three times. Pin the contract: the example's
+// three token/value sequences, each followed by deinit(), leave nothing behind
+// under the leak-checking testing allocator.
+test "SONNY-2425: deinit frees the string buffer that next, peek and readValue grow" {
+    const allocator = std.testing.allocator;
+    const doc = "{\"name\": \"Alice\", \"age\": 30, \"tags\": [\"dev\", \"zig\"]}";
+    {
+        var tokenizer = Tokenizer.init(allocator, doc, .{});
+        defer tokenizer.deinit();
+        var strings: usize = 0;
+        while (true) {
+            const token = try tokenizer.next();
+            if (token.type == .eof) break;
+            if (token.type == .string) strings += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 6), strings);
+    }
+    {
+        var tokenizer = Tokenizer.init(allocator, doc, .{});
+        defer tokenizer.deinit();
+        const value = try readValue(&tokenizer);
+        defer freeValue(allocator, value);
+        try std.testing.expect(value == .obj);
+        try std.testing.expectEqual(@as(usize, 3), value.obj.len);
+    }
+    {
+        var tokenizer = Tokenizer.init(allocator, "[{\"id\": 1, \"value\": \"first\"}, {\"id\": 2, \"value\": \"second\"}]", .{});
+        defer tokenizer.deinit();
+        try std.testing.expectEqual(TokenType.array_start, (try tokenizer.next()).type);
+        var items: usize = 0;
+        while ((try tokenizer.peek()).type != .array_end) {
+            const item = try readValue(&tokenizer);
+            defer freeValue(allocator, item);
+            try std.testing.expect(item == .obj);
+            items += 1;
+            if ((try tokenizer.peek()).type == .comma) _ = try tokenizer.next();
+        }
+        try std.testing.expectEqual(@as(usize, 2), items);
+    }
+}
+
 // ============================================================================
 // Reader-based Streaming Tokenizer
 // ============================================================================

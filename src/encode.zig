@@ -1600,6 +1600,26 @@ fn expectWideStructRoundTrip(comptime T: type, value: T) !void {
     const reencoded = try encode(a, tree, .{});
     defer a.free(reencoded);
     try std.testing.expectEqualStrings(declared, reencoded);
+
+    // SONNY-2417: the other typed inverses must give the value back too:
+    // fromValue on the toValue tree, and the path-tracking unmarshalWithInfo
+    // on the text.
+    var from_tree = try json.fromValue(T, a, tree);
+    defer json.free(T, a, &from_tree);
+    try std.testing.expectEqualDeep(value, from_tree);
+
+    switch (json.unmarshalWithInfo(T, a, declared)) {
+        .ok => |ok| {
+            var back = ok;
+            defer json.free(T, a, &back);
+            try std.testing.expectEqualDeep(value, back);
+        },
+        .err => |e| {
+            std.debug.print("unmarshalWithInfo: {s} at '{s}'\n", .{ e.message, e.path });
+            a.free(e.path);
+            return error.TestUnexpectedResult;
+        },
+    }
 }
 
 // SONNY-2405: a struct with enough fields to exceed the default comptime
@@ -2104,8 +2124,8 @@ test "SONNY-2405 float: cborEncode keeps an integral toValue float a CBOR intege
 // spell every finite float identically. That includes the extremes that used
 // to panic in toValue (anything longer than 32 bytes in decimal) or print the
 // invalid literal "(float)" in encode (decimal longer than 347 bytes, e.g.
-// tiny f80/f128 values). f80/f128 values above floatMax(f64) are left out:
-// their NaN/Inf pre-check narrows to f64, which is tracked separately.
+// tiny f80/f128 values). SONNY-2417: and f80/f128 values above floatMax(f64),
+// which the NaN/Inf check used to see as infinite after narrowing to f64.
 test "SONNY-2405 float: encode and toValue spell every float identically" {
     const a = std.testing.allocator;
     inline for (.{ f16, f32, f64, f80, f128 }) |T| {
@@ -2114,10 +2134,7 @@ test "SONNY-2405 float: encode and toValue spell every float identically" {
             M.floatTrueMin(T), -M.floatTrueMin(T), M.floatMin(T), M.floatEps(T), 1.0 / 3.0,
             3.25,              1.0,                0.0,           -@as(T, 0.0),  0.1,
         };
-        const large = if (@bitSizeOf(T) <= 64)
-            [_]T{ M.floatMax(T), -M.floatMax(T) }
-        else
-            [_]T{ 1e308, -1e308 };
+        const large = [_]T{ M.floatMax(T), -M.floatMax(T) };
         for (common ++ large) |v| {
             const s = try encode(a, v, .{});
             defer a.free(s);
@@ -2235,6 +2252,553 @@ test "SONNY-2405 int: toValue of a struct with a u128 id field" {
     const via_tree = try encode(a, tree, .{});
     defer a.free(via_tree);
     try std.testing.expectEqualStrings(direct, via_tree);
+}
+
+// SONNY-2417: every field an `inline for` unrolls spends a few backward
+// branches of the enclosing function's comptime quota, which defaults to
+// 1,000. Measured on Zig 0.16.0: toValueInternal spends 4 per field,
+// unmarshalStruct 10 and unmarshalStructWithPath 9, so the typed unmarshal
+// paths (json.unmarshal, fromValue, unmarshalWithInfo) stopped compiling at
+// about 100 fields and json.toValue at about 250. The fields cycle through
+// the integer, string, bool and float kinds of a typed contract, declared in
+// reverse name order so deterministic encoding reorders every one.
+test "SONNY-2417 wide: a 128-field struct round-trips through typed unmarshal" {
+    const Wide128 = struct {
+        contract_field_127: i32 = -100,
+        contract_field_126: []const u8 = "value 1",
+        contract_field_125: bool = false,
+        contract_field_124: f64 = 3.25,
+        contract_field_123: u64 = 4000012,
+        contract_field_122: i64 = -5000165,
+        contract_field_121: i32 = -58,
+        contract_field_120: []const u8 = "value 7",
+        contract_field_119: bool = true,
+        contract_field_118: f64 = 0.1,
+        contract_field_117: u64 = 10000030,
+        contract_field_116: i64 = -11000363,
+        contract_field_115: i32 = -16,
+        contract_field_114: []const u8 = "value 13",
+        contract_field_113: bool = false,
+        contract_field_112: f64 = -2.5,
+        contract_field_111: u64 = 16000048,
+        contract_field_110: i64 = -17000561,
+        contract_field_109: i32 = 26,
+        contract_field_108: []const u8 = "value 19",
+        contract_field_107: bool = true,
+        contract_field_106: f64 = 1e21,
+        contract_field_105: u64 = 22000066,
+        contract_field_104: i64 = -23000759,
+        contract_field_103: i32 = 68,
+        contract_field_102: []const u8 = "value 25",
+        contract_field_101: bool = false,
+        contract_field_100: f64 = 1.5e-7,
+        contract_field_099: u64 = 28000084,
+        contract_field_098: i64 = -29000957,
+        contract_field_097: i32 = 110,
+        contract_field_096: []const u8 = "value 31",
+        contract_field_095: bool = true,
+        contract_field_094: f64 = 10.5,
+        contract_field_093: u64 = 34000102,
+        contract_field_092: i64 = -35001155,
+        contract_field_091: i32 = 152,
+        contract_field_090: []const u8 = "value 37",
+        contract_field_089: bool = false,
+        contract_field_088: f64 = 3.25,
+        contract_field_087: u64 = 40000120,
+        contract_field_086: i64 = -41001353,
+        contract_field_085: i32 = 194,
+        contract_field_084: []const u8 = "value 43",
+        contract_field_083: bool = true,
+        contract_field_082: f64 = 0.1,
+        contract_field_081: u64 = 46000138,
+        contract_field_080: i64 = -47001551,
+        contract_field_079: i32 = 236,
+        contract_field_078: []const u8 = "value 49",
+        contract_field_077: bool = false,
+        contract_field_076: f64 = -2.5,
+        contract_field_075: u64 = 52000156,
+        contract_field_074: i64 = -53001749,
+        contract_field_073: i32 = 278,
+        contract_field_072: []const u8 = "value 55",
+        contract_field_071: bool = true,
+        contract_field_070: f64 = 1e21,
+        contract_field_069: u64 = 58000174,
+        contract_field_068: i64 = -59001947,
+        contract_field_067: i32 = 320,
+        contract_field_066: []const u8 = "value 61",
+        contract_field_065: bool = false,
+        contract_field_064: f64 = 1.5e-7,
+        contract_field_063: u64 = 64000192,
+        contract_field_062: i64 = -65002145,
+        contract_field_061: i32 = 362,
+        contract_field_060: []const u8 = "value 67",
+        contract_field_059: bool = true,
+        contract_field_058: f64 = 10.5,
+        contract_field_057: u64 = 70000210,
+        contract_field_056: i64 = -71002343,
+        contract_field_055: i32 = 404,
+        contract_field_054: []const u8 = "value 73",
+        contract_field_053: bool = false,
+        contract_field_052: f64 = 3.25,
+        contract_field_051: u64 = 76000228,
+        contract_field_050: i64 = -77002541,
+        contract_field_049: i32 = 446,
+        contract_field_048: []const u8 = "value 79",
+        contract_field_047: bool = true,
+        contract_field_046: f64 = 0.1,
+        contract_field_045: u64 = 82000246,
+        contract_field_044: i64 = -83002739,
+        contract_field_043: i32 = 488,
+        contract_field_042: []const u8 = "value 85",
+        contract_field_041: bool = false,
+        contract_field_040: f64 = -2.5,
+        contract_field_039: u64 = 88000264,
+        contract_field_038: i64 = -89002937,
+        contract_field_037: i32 = 530,
+        contract_field_036: []const u8 = "value 91",
+        contract_field_035: bool = true,
+        contract_field_034: f64 = 1e21,
+        contract_field_033: u64 = 94000282,
+        contract_field_032: i64 = -95003135,
+        contract_field_031: i32 = 572,
+        contract_field_030: []const u8 = "value 97",
+        contract_field_029: bool = false,
+        contract_field_028: f64 = 1.5e-7,
+        contract_field_027: u64 = 100000300,
+        contract_field_026: i64 = -101003333,
+        contract_field_025: i32 = 614,
+        contract_field_024: []const u8 = "value 103",
+        contract_field_023: bool = true,
+        contract_field_022: f64 = 10.5,
+        contract_field_021: u64 = 106000318,
+        contract_field_020: i64 = -107003531,
+        contract_field_019: i32 = 656,
+        contract_field_018: []const u8 = "value 109",
+        contract_field_017: bool = false,
+        contract_field_016: f64 = 3.25,
+        contract_field_015: u64 = 112000336,
+        contract_field_014: i64 = -113003729,
+        contract_field_013: i32 = 698,
+        contract_field_012: []const u8 = "value 115",
+        contract_field_011: bool = true,
+        contract_field_010: f64 = 0.1,
+        contract_field_009: u64 = 118000354,
+        contract_field_008: i64 = -119003927,
+        contract_field_007: i32 = 740,
+        contract_field_006: []const u8 = "value 121",
+        contract_field_005: bool = false,
+        contract_field_004: f64 = -2.5,
+        contract_field_003: u64 = 124000372,
+        contract_field_002: i64 = -125004125,
+        contract_field_001: i32 = 782,
+        contract_field_000: []const u8 = "value 127",
+    };
+
+    try expectWideStructRoundTrip(Wide128, .{});
+}
+
+test "SONNY-2417 wide: a 256-field struct round-trips through toValue" {
+    const Wide256 = struct {
+        contract_field_255: i32 = -100,
+        contract_field_254: []const u8 = "value 1",
+        contract_field_253: bool = false,
+        contract_field_252: f64 = 3.25,
+        contract_field_251: u64 = 4000012,
+        contract_field_250: i64 = -5000165,
+        contract_field_249: i32 = -58,
+        contract_field_248: []const u8 = "value 7",
+        contract_field_247: bool = true,
+        contract_field_246: f64 = 0.1,
+        contract_field_245: u64 = 10000030,
+        contract_field_244: i64 = -11000363,
+        contract_field_243: i32 = -16,
+        contract_field_242: []const u8 = "value 13",
+        contract_field_241: bool = false,
+        contract_field_240: f64 = -2.5,
+        contract_field_239: u64 = 16000048,
+        contract_field_238: i64 = -17000561,
+        contract_field_237: i32 = 26,
+        contract_field_236: []const u8 = "value 19",
+        contract_field_235: bool = true,
+        contract_field_234: f64 = 1e21,
+        contract_field_233: u64 = 22000066,
+        contract_field_232: i64 = -23000759,
+        contract_field_231: i32 = 68,
+        contract_field_230: []const u8 = "value 25",
+        contract_field_229: bool = false,
+        contract_field_228: f64 = 1.5e-7,
+        contract_field_227: u64 = 28000084,
+        contract_field_226: i64 = -29000957,
+        contract_field_225: i32 = 110,
+        contract_field_224: []const u8 = "value 31",
+        contract_field_223: bool = true,
+        contract_field_222: f64 = 10.5,
+        contract_field_221: u64 = 34000102,
+        contract_field_220: i64 = -35001155,
+        contract_field_219: i32 = 152,
+        contract_field_218: []const u8 = "value 37",
+        contract_field_217: bool = false,
+        contract_field_216: f64 = 3.25,
+        contract_field_215: u64 = 40000120,
+        contract_field_214: i64 = -41001353,
+        contract_field_213: i32 = 194,
+        contract_field_212: []const u8 = "value 43",
+        contract_field_211: bool = true,
+        contract_field_210: f64 = 0.1,
+        contract_field_209: u64 = 46000138,
+        contract_field_208: i64 = -47001551,
+        contract_field_207: i32 = 236,
+        contract_field_206: []const u8 = "value 49",
+        contract_field_205: bool = false,
+        contract_field_204: f64 = -2.5,
+        contract_field_203: u64 = 52000156,
+        contract_field_202: i64 = -53001749,
+        contract_field_201: i32 = 278,
+        contract_field_200: []const u8 = "value 55",
+        contract_field_199: bool = true,
+        contract_field_198: f64 = 1e21,
+        contract_field_197: u64 = 58000174,
+        contract_field_196: i64 = -59001947,
+        contract_field_195: i32 = 320,
+        contract_field_194: []const u8 = "value 61",
+        contract_field_193: bool = false,
+        contract_field_192: f64 = 1.5e-7,
+        contract_field_191: u64 = 64000192,
+        contract_field_190: i64 = -65002145,
+        contract_field_189: i32 = 362,
+        contract_field_188: []const u8 = "value 67",
+        contract_field_187: bool = true,
+        contract_field_186: f64 = 10.5,
+        contract_field_185: u64 = 70000210,
+        contract_field_184: i64 = -71002343,
+        contract_field_183: i32 = 404,
+        contract_field_182: []const u8 = "value 73",
+        contract_field_181: bool = false,
+        contract_field_180: f64 = 3.25,
+        contract_field_179: u64 = 76000228,
+        contract_field_178: i64 = -77002541,
+        contract_field_177: i32 = 446,
+        contract_field_176: []const u8 = "value 79",
+        contract_field_175: bool = true,
+        contract_field_174: f64 = 0.1,
+        contract_field_173: u64 = 82000246,
+        contract_field_172: i64 = -83002739,
+        contract_field_171: i32 = 488,
+        contract_field_170: []const u8 = "value 85",
+        contract_field_169: bool = false,
+        contract_field_168: f64 = -2.5,
+        contract_field_167: u64 = 88000264,
+        contract_field_166: i64 = -89002937,
+        contract_field_165: i32 = 530,
+        contract_field_164: []const u8 = "value 91",
+        contract_field_163: bool = true,
+        contract_field_162: f64 = 1e21,
+        contract_field_161: u64 = 94000282,
+        contract_field_160: i64 = -95003135,
+        contract_field_159: i32 = 572,
+        contract_field_158: []const u8 = "value 97",
+        contract_field_157: bool = false,
+        contract_field_156: f64 = 1.5e-7,
+        contract_field_155: u64 = 100000300,
+        contract_field_154: i64 = -101003333,
+        contract_field_153: i32 = 614,
+        contract_field_152: []const u8 = "value 103",
+        contract_field_151: bool = true,
+        contract_field_150: f64 = 10.5,
+        contract_field_149: u64 = 106000318,
+        contract_field_148: i64 = -107003531,
+        contract_field_147: i32 = 656,
+        contract_field_146: []const u8 = "value 109",
+        contract_field_145: bool = false,
+        contract_field_144: f64 = 3.25,
+        contract_field_143: u64 = 112000336,
+        contract_field_142: i64 = -113003729,
+        contract_field_141: i32 = 698,
+        contract_field_140: []const u8 = "value 115",
+        contract_field_139: bool = true,
+        contract_field_138: f64 = 0.1,
+        contract_field_137: u64 = 118000354,
+        contract_field_136: i64 = -119003927,
+        contract_field_135: i32 = 740,
+        contract_field_134: []const u8 = "value 121",
+        contract_field_133: bool = false,
+        contract_field_132: f64 = -2.5,
+        contract_field_131: u64 = 124000372,
+        contract_field_130: i64 = -125004125,
+        contract_field_129: i32 = 782,
+        contract_field_128: []const u8 = "value 127",
+        contract_field_127: bool = true,
+        contract_field_126: f64 = 1e21,
+        contract_field_125: u64 = 130000390,
+        contract_field_124: i64 = -131004323,
+        contract_field_123: i32 = 824,
+        contract_field_122: []const u8 = "value 133",
+        contract_field_121: bool = false,
+        contract_field_120: f64 = 1.5e-7,
+        contract_field_119: u64 = 136000408,
+        contract_field_118: i64 = -137004521,
+        contract_field_117: i32 = 866,
+        contract_field_116: []const u8 = "value 139",
+        contract_field_115: bool = true,
+        contract_field_114: f64 = 10.5,
+        contract_field_113: u64 = 142000426,
+        contract_field_112: i64 = -143004719,
+        contract_field_111: i32 = 908,
+        contract_field_110: []const u8 = "value 145",
+        contract_field_109: bool = false,
+        contract_field_108: f64 = 3.25,
+        contract_field_107: u64 = 148000444,
+        contract_field_106: i64 = -149004917,
+        contract_field_105: i32 = 950,
+        contract_field_104: []const u8 = "value 151",
+        contract_field_103: bool = true,
+        contract_field_102: f64 = 0.1,
+        contract_field_101: u64 = 154000462,
+        contract_field_100: i64 = -155005115,
+        contract_field_099: i32 = 992,
+        contract_field_098: []const u8 = "value 157",
+        contract_field_097: bool = false,
+        contract_field_096: f64 = -2.5,
+        contract_field_095: u64 = 160000480,
+        contract_field_094: i64 = -161005313,
+        contract_field_093: i32 = 1034,
+        contract_field_092: []const u8 = "value 163",
+        contract_field_091: bool = true,
+        contract_field_090: f64 = 1e21,
+        contract_field_089: u64 = 166000498,
+        contract_field_088: i64 = -167005511,
+        contract_field_087: i32 = 1076,
+        contract_field_086: []const u8 = "value 169",
+        contract_field_085: bool = false,
+        contract_field_084: f64 = 1.5e-7,
+        contract_field_083: u64 = 172000516,
+        contract_field_082: i64 = -173005709,
+        contract_field_081: i32 = 1118,
+        contract_field_080: []const u8 = "value 175",
+        contract_field_079: bool = true,
+        contract_field_078: f64 = 10.5,
+        contract_field_077: u64 = 178000534,
+        contract_field_076: i64 = -179005907,
+        contract_field_075: i32 = 1160,
+        contract_field_074: []const u8 = "value 181",
+        contract_field_073: bool = false,
+        contract_field_072: f64 = 3.25,
+        contract_field_071: u64 = 184000552,
+        contract_field_070: i64 = -185006105,
+        contract_field_069: i32 = 1202,
+        contract_field_068: []const u8 = "value 187",
+        contract_field_067: bool = true,
+        contract_field_066: f64 = 0.1,
+        contract_field_065: u64 = 190000570,
+        contract_field_064: i64 = -191006303,
+        contract_field_063: i32 = 1244,
+        contract_field_062: []const u8 = "value 193",
+        contract_field_061: bool = false,
+        contract_field_060: f64 = -2.5,
+        contract_field_059: u64 = 196000588,
+        contract_field_058: i64 = -197006501,
+        contract_field_057: i32 = 1286,
+        contract_field_056: []const u8 = "value 199",
+        contract_field_055: bool = true,
+        contract_field_054: f64 = 1e21,
+        contract_field_053: u64 = 202000606,
+        contract_field_052: i64 = -203006699,
+        contract_field_051: i32 = 1328,
+        contract_field_050: []const u8 = "value 205",
+        contract_field_049: bool = false,
+        contract_field_048: f64 = 1.5e-7,
+        contract_field_047: u64 = 208000624,
+        contract_field_046: i64 = -209006897,
+        contract_field_045: i32 = 1370,
+        contract_field_044: []const u8 = "value 211",
+        contract_field_043: bool = true,
+        contract_field_042: f64 = 10.5,
+        contract_field_041: u64 = 214000642,
+        contract_field_040: i64 = -215007095,
+        contract_field_039: i32 = 1412,
+        contract_field_038: []const u8 = "value 217",
+        contract_field_037: bool = false,
+        contract_field_036: f64 = 3.25,
+        contract_field_035: u64 = 220000660,
+        contract_field_034: i64 = -221007293,
+        contract_field_033: i32 = 1454,
+        contract_field_032: []const u8 = "value 223",
+        contract_field_031: bool = true,
+        contract_field_030: f64 = 0.1,
+        contract_field_029: u64 = 226000678,
+        contract_field_028: i64 = -227007491,
+        contract_field_027: i32 = 1496,
+        contract_field_026: []const u8 = "value 229",
+        contract_field_025: bool = false,
+        contract_field_024: f64 = -2.5,
+        contract_field_023: u64 = 232000696,
+        contract_field_022: i64 = -233007689,
+        contract_field_021: i32 = 1538,
+        contract_field_020: []const u8 = "value 235",
+        contract_field_019: bool = true,
+        contract_field_018: f64 = 1e21,
+        contract_field_017: u64 = 238000714,
+        contract_field_016: i64 = -239007887,
+        contract_field_015: i32 = 1580,
+        contract_field_014: []const u8 = "value 241",
+        contract_field_013: bool = false,
+        contract_field_012: f64 = 1.5e-7,
+        contract_field_011: u64 = 244000732,
+        contract_field_010: i64 = -245008085,
+        contract_field_009: i32 = 1622,
+        contract_field_008: []const u8 = "value 247",
+        contract_field_007: bool = true,
+        contract_field_006: f64 = 10.5,
+        contract_field_005: u64 = 250000750,
+        contract_field_004: i64 = -251008283,
+        contract_field_003: i32 = 1664,
+        contract_field_002: []const u8 = "value 253",
+        contract_field_001: bool = false,
+        contract_field_000: f64 = 3.25,
+    };
+
+    try expectWideStructRoundTrip(Wide256, .{});
+}
+
+// SONNY-2417: toValue of any struct with an optional field did not compile
+// ("comptime control flow inside runtime block"): the member loop skipped a
+// null optional with `continue` under a runtime `if`, which an `inline for`
+// cannot do. appendStructMembers, which flattens `inline` fields, had the
+// same loop. toValue(x) must now encode exactly like encode(x), with and
+// without emit_null_optional_fields, and fromValue must give x back.
+test "SONNY-2417 optional: toValue of structs with optional fields matches encode and round-trips" {
+    const Limits = struct {
+        max_bytes: ?u64 = null,
+        max_depth: ?u16 = null,
+    };
+    const Rule = struct {
+        id: []const u8,
+        effect: enum { allow, deny },
+        note: ?[]const u8 = null,
+        weight: ?f64 = null,
+        limits: ?Limits = null,
+    };
+    const Audit = struct {
+        trace_id: ?[]const u8 = null,
+        attempt: u32 = 1,
+    };
+    const Policy = struct {
+        name: []const u8,
+        version: u32,
+        description: ?[]const u8 = null,
+        primary: Rule,
+        fallback: ?Rule = null,
+        audit: Audit = .{},
+
+        pub const json_config = .{
+            .audit = FieldConfig{ .@"inline" = true },
+        };
+    };
+
+    const cases = [_]Policy{
+        .{
+            .name = "every optional set",
+            .version = 3,
+            .description = "all present",
+            .primary = .{ .id = "r1", .effect = .allow, .note = "first", .weight = 0.5, .limits = .{ .max_bytes = 4096 } },
+            .fallback = .{ .id = "fb", .effect = .deny, .limits = .{ .max_depth = 8 } },
+            .audit = .{ .trace_id = "t-1", .attempt = 2 },
+        },
+        .{ .name = "every optional null", .version = 1, .primary = .{ .id = "r2", .effect = .deny } },
+    };
+
+    const a = std.testing.allocator;
+    for (cases) |p| {
+        inline for (.{ false, true }) |emit_null| {
+            const opts: EncodeOptions = .{ .emit_null_optional_fields = emit_null };
+            const tree = try toValue(a, p, opts);
+            defer freeValue(a, tree);
+            const direct = try encode(a, p, opts);
+            defer a.free(direct);
+            const via_tree = try encode(a, tree, .{});
+            defer a.free(via_tree);
+            try std.testing.expectEqualStrings(direct, via_tree);
+
+            var back = try json.fromValue(Policy, a, tree);
+            defer json.free(Policy, a, &back);
+            try std.testing.expectEqualDeep(p, back);
+        }
+    }
+}
+
+// SONNY-2417: encodeFloat and toValueInternal checked for NaN/Inf on an f64
+// narrowing of the value, and @floatCast to f64 turns every finite f80/f128
+// above floatMax(f64) into an infinity. Those values came out as JSON null,
+// or with allow_nan_infinity as "Infinity"/"-Infinity", instead of numbers.
+// comptime_float (f128 inside the compiler) was narrowed the same way. Both
+// paths must emit the same valid JSON number under either setting, and
+// json.parse must accept it and give back the exact value.
+test "SONNY-2417 float: f80/f128 values above floatMax(f64) encode as JSON numbers" {
+    const a = std.testing.allocator;
+    inline for (.{ f80, f128 }) |T| {
+        const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+        const values = [_]T{
+            std.math.floatMax(T),
+            -std.math.floatMax(T),
+            @as(T, std.math.floatMax(f64)) * 2,
+            1e309,
+            -1e4000,
+        };
+        for (values) |v| {
+            inline for (.{ false, true }) |allow_nan_infinity| {
+                const opts: EncodeOptions = .{ .allow_nan_infinity = allow_nan_infinity };
+                const s = try encode(a, v, opts);
+                defer a.free(s);
+                const tv = try toValue(a, v, opts);
+                defer freeValue(a, tv);
+                try std.testing.expect(tv == .num);
+                try std.testing.expectEqualStrings(s, tv.num.lexeme);
+
+                var perr = json.ParseError.init();
+                var doc = try json.parse(a, s, .{}, &perr);
+                defer doc.deinit();
+                try std.testing.expect(doc.root == .num);
+                const back = try std.fmt.parseFloat(T, doc.root.num.lexeme);
+                try std.testing.expectEqual(@as(Bits, @bitCast(v)), @as(Bits, @bitCast(back)));
+            }
+        }
+    }
+
+    const s = try encode(a, 1e400, .{});
+    defer a.free(s);
+    try std.testing.expectEqualStrings("1e400", s);
+    const tv = try toValue(a, -1e400, .{});
+    defer freeValue(a, tv);
+    try std.testing.expect(tv == .num);
+    try std.testing.expectEqualStrings("-1e400", tv.num.lexeme);
+}
+
+// SONNY-2417: checking NaN/Inf in the value's own type must leave the policy
+// for real f80/f128 NaN and infinities unchanged: null by default, the
+// "NaN"/"Infinity"/"-Infinity" sentinels with allow_nan_infinity.
+test "SONNY-2417 float: f80/f128 NaN and infinities keep the allow_nan_infinity policy" {
+    const a = std.testing.allocator;
+    inline for (.{ f80, f128 }) |T| {
+        const specials = [_]T{ std.math.nan(T), std.math.inf(T), -std.math.inf(T) };
+        const sentinels = [_][]const u8{ "NaN", "Infinity", "-Infinity" };
+        for (specials, sentinels) |v, sentinel| {
+            const s_null = try encode(a, v, .{});
+            defer a.free(s_null);
+            try std.testing.expectEqualStrings("null", s_null);
+            const tv_null = try toValue(a, v, .{});
+            defer freeValue(a, tv_null);
+            try std.testing.expect(tv_null == .null);
+
+            const s_str = try encode(a, v, .{ .allow_nan_infinity = true });
+            defer a.free(s_str);
+            try std.testing.expectEqualStrings(sentinel, s_str[1 .. s_str.len - 1]);
+            try std.testing.expect(s_str[0] == '"' and s_str[s_str.len - 1] == '"');
+            const tv_str = try toValue(a, v, .{ .allow_nan_infinity = true });
+            defer freeValue(a, tv_str);
+            try std.testing.expect(tv_str == .str);
+            try std.testing.expectEqualStrings(sentinel, tv_str.str);
+        }
+    }
 }
 
 test "encode escape non-ascii" {
