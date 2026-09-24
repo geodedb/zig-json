@@ -768,3 +768,76 @@ test "streaming encoder mismatched container end returns InvalidState" {
     try enc2.beginArray();
     try std.testing.expectError(error.InvalidState, enc2.endObject());
 }
+
+/// SONNY-2417: the streaming encoder's output for a lone float.
+fn streamFloat(a: std.mem.Allocator, value: anytype) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var enc = encoder(a, &aw.writer, .{});
+    defer enc.deinit();
+    try enc.writeFloat(value);
+    return a.dupe(u8, aw.written());
+}
+
+// SONNY-2417: writeFloat classified NaN/Inf on an f64 narrowing of the value,
+// and @floatCast to f64 turns every finite f80/f128 above floatMax(f64) into
+// an infinity, so the streaming encoder wrote null for them. It must write
+// the number encode() writes, which json.parse accepts and which parses back
+// to the exact value.
+test "SONNY-2417 streaming: writeFloat of f80/f128 above floatMax(f64) is a JSON number" {
+    const a = std.testing.allocator;
+    inline for (.{ f80, f128 }) |T| {
+        const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+        const values = [_]T{
+            std.math.floatMax(T),
+            -std.math.floatMax(T),
+            @as(T, std.math.floatMax(f64)) * 2,
+            1e309,
+            -1e4000,
+        };
+        for (values) |v| {
+            const encoded = try json.encode(a, v, .{});
+            defer a.free(encoded);
+            const streamed = try streamFloat(a, v);
+            defer a.free(streamed);
+            try std.testing.expectEqualStrings(encoded, streamed);
+
+            var perr = json.ParseError.init();
+            var doc = try json.parse(a, streamed, .{}, &perr);
+            defer doc.deinit();
+            try std.testing.expect(doc.root == .num);
+            const back = try std.fmt.parseFloat(T, streamed);
+            try std.testing.expectEqual(@as(Bits, @bitCast(v)), @as(Bits, @bitCast(back)));
+        }
+    }
+}
+
+// SONNY-2417: writeFloat must write every float exactly as encode() does, at
+// every width: ordinary values; the extremes, including f80/f128 decimals
+// longer than 347 bytes, which "{d}" printed as the invalid literal
+// "(float)"; and null for NaN and the infinities.
+test "SONNY-2417 streaming: writeFloat matches encode byte-for-byte for every float width" {
+    const a = std.testing.allocator;
+    inline for (.{ f16, f32, f64, f80, f128 }) |T| {
+        const M = std.math;
+        const values = [_]T{
+            M.floatTrueMin(T), -M.floatTrueMin(T), M.floatMin(T), M.floatEps(T), 1.0 / 3.0,
+            3.25,              1.0,                0.0,           -@as(T, 0.0),  0.1,
+            M.floatMax(T),     -M.floatMax(T),     M.nan(T),      M.inf(T),      -M.inf(T),
+        };
+        for (values) |v| {
+            const encoded = try json.encode(a, v, .{});
+            defer a.free(encoded);
+            const streamed = try streamFloat(a, v);
+            defer a.free(streamed);
+            try std.testing.expectEqualStrings(encoded, streamed);
+        }
+    }
+    inline for (.{ 0.1, 1.0 / 3.0, 1e400, -1e400 }) |v| {
+        const encoded = try json.encode(a, v, .{});
+        defer a.free(encoded);
+        const streamed = try streamFloat(a, v);
+        defer a.free(streamed);
+        try std.testing.expectEqualStrings(encoded, streamed);
+    }
+}
