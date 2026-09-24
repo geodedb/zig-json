@@ -580,9 +580,12 @@ fn renderFloatLexeme(buf: *[float_lexeme_buf_len]u8, value: anytype) []const u8 
 fn encodeFloat(writer: anytype, value: anytype, stringify: bool, allow_nan_infinity: bool) !void {
     const T = @TypeOf(value);
 
-    // Handle special float values
+    // Handle special float values. SONNY-2417: classify in the value's own
+    // type (comptime_float as f128, its width inside the compiler). Narrowing
+    // to f64 first turned every finite f80/f128 above floatMax(f64) into an
+    // infinity, so those numbers were written as null or "Infinity".
     if (@typeInfo(T) == .float or @typeInfo(T) == .comptime_float) {
-        const f: f64 = if (@typeInfo(T) == .comptime_float) value else @floatCast(value);
+        const f = if (@typeInfo(T) == .comptime_float) @as(f128, value) else value;
 
         if (std.math.isNan(f)) {
             if (allow_nan_infinity) {
@@ -1218,7 +1221,10 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
         },
 
         .float, .comptime_float => {
-            const f: f64 = if (@typeInfo(T) == .comptime_float) value else @floatCast(value);
+            // SONNY-2417: classify NaN/Inf in the value's own type, as
+            // encodeFloat does; narrowing to f64 made finite f80/f128 values
+            // above floatMax(f64) infinite.
+            const f = if (@typeInfo(T) == .comptime_float) @as(f128, value) else value;
             if (std.math.isNan(f)) {
                 if (options.allow_nan_infinity) {
                     return .{ .str = try allocator.dupe(u8, "NaN") };
@@ -1294,6 +1300,11 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
         },
 
         .@"struct" => |s| {
+            // SONNY-2417: the `inline for` loops below spend about 4 backward
+            // branches of this function's comptime quota per field (measured
+            // on Zig 0.16.0), so the default 1,000 ran out at about 250
+            // fields. 64 per field leaves 16x headroom at any width.
+            @setEvalBranchQuota(1_000 + 64 * s.fields.len);
             if (T == Value) {
                 return value;
             }
@@ -1359,13 +1370,20 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                         continue;
                     }
 
-                    if (@typeInfo(field.type) == .optional) {
-                        if (fv == null and !options.emit_null_optional_fields) continue;
+                    // SONNY-2417: an `inline for` body cannot `continue` under
+                    // a runtime condition ("comptime control flow inside
+                    // runtime block"), so a null optional is skipped by
+                    // guarding the append instead.
+                    const present = if (@typeInfo(field.type) == .optional)
+                        fv != null or options.emit_null_optional_fields
+                    else
+                        true;
+                    if (present) {
+                        const json_name = field_cfg.name orelse field.name;
+                        members[idx].k = try allocator.dupe(u8, json_name);
+                        members[idx].v = try toValueInternal(allocator, fv, options, depth + 1);
+                        idx += 1;
                     }
-                    const json_name = field_cfg.name orelse field.name;
-                    members[idx].k = try allocator.dupe(u8, json_name);
-                    members[idx].v = try toValueInternal(allocator, fv, options, depth + 1);
-                    idx += 1;
                 }
                 return .{ .obj = members };
             }
@@ -1486,14 +1504,17 @@ fn appendStructMembers(
             continue;
         }
 
-        if (@typeInfo(field.type) == .optional) {
-            if (fv == null and !options.emit_null_optional_fields) continue;
+        // SONNY-2417: guard the append; see toValueInternal's member loop.
+        const present = if (@typeInfo(field.type) == .optional)
+            fv != null or options.emit_null_optional_fields
+        else
+            true;
+        if (present) {
+            const json_name = field_cfg.name orelse field.name;
+            members[idx].k = try allocator.dupe(u8, json_name);
+            members[idx].v = try toValueInternal(allocator, fv, options, depth + 1);
+            idx += 1;
         }
-
-        const json_name = field_cfg.name orelse field.name;
-        members[idx].k = try allocator.dupe(u8, json_name);
-        members[idx].v = try toValueInternal(allocator, fv, options, depth + 1);
-        idx += 1;
     }
     return idx;
 }

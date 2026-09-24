@@ -552,6 +552,11 @@ fn unmarshalStruct(
     obj: []const Member,
     opts: UnmarshalOptions,
 ) UnmarshalError!T {
+    // SONNY-2417: the `inline for` loops below spend about 10 backward
+    // branches of this function's comptime quota per field (measured on Zig
+    // 0.16.0), so the default 1,000 ran out at about 100 fields. 64 per field
+    // leaves 6x headroom at any width.
+    @setEvalBranchQuota(1_000 + 64 * s.fields.len);
     var result: T = undefined;
     var fields_found: [s.fields.len]bool = [_]bool{false} ** s.fields.len;
     // Track which fields hold owned heap memory so that, if a later field/member
@@ -1025,6 +1030,9 @@ fn unmarshalStructWithPath(
     opts: UnmarshalOptions,
     path: []const u8,
 ) UnmarshalResult(T) {
+    // SONNY-2417: about 9 backward branches per field here; see
+    // unmarshalStruct.
+    @setEvalBranchQuota(1_000 + 64 * s.fields.len);
     var result: T = undefined;
     var fields_found: [s.fields.len]bool = [_]bool{false} ** s.fields.len;
     // Track owned fields so a later error frees the already-populated prefix
