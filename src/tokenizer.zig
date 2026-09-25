@@ -329,7 +329,7 @@ pub const Tokenizer = struct {
         if (self.pos + 4 > self.input.len) return error.InvalidEscape;
 
         const hex = self.input[self.pos..][0..4];
-        const cp1 = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidEscape;
+        const cp1 = unicode.parseHex4(hex) orelse return error.InvalidEscape;
         self.pos += 4;
         self.col += 4;
 
@@ -344,7 +344,7 @@ pub const Tokenizer = struct {
             self.col += 2;
 
             const hex2 = self.input[self.pos..][0..4];
-            const cp2 = std.fmt.parseInt(u16, hex2, 16) catch return error.InvalidEscape;
+            const cp2 = unicode.parseHex4(hex2) orelse return error.InvalidEscape;
             self.pos += 4;
             self.col += 4;
 
@@ -1498,7 +1498,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                 hex[i] = self.readByte() catch return error.InvalidEscape;
             }
 
-            const cp1 = std.fmt.parseInt(u16, &hex, 16) catch return error.InvalidEscape;
+            const cp1 = unicode.parseHex4(&hex) orelse return error.InvalidEscape;
 
             // Check for surrogate pair
             if (cp1 >= 0xD800 and cp1 <= 0xDBFF) {
@@ -1512,7 +1512,7 @@ pub fn ReaderTokenizer(comptime ReaderType: type) type {
                     hex2[i] = self.readByte() catch return error.InvalidSurrogate;
                 }
 
-                const cp2 = std.fmt.parseInt(u16, &hex2, 16) catch return error.InvalidEscape;
+                const cp2 = unicode.parseHex4(&hex2) orelse return error.InvalidEscape;
                 if (cp2 < 0xDC00 or cp2 > 0xDFFF) return error.InvalidSurrogate;
 
                 const high: u21 = cp1 - 0xD800;
@@ -2123,4 +2123,71 @@ test "ReaderTokenizer huge exponent does not crash (NASR-001)" {
     defer freeValue(allocator, v);
     try std.testing.expect(v == .num);
     try std.testing.expectEqualStrings("1e99999999999", v.num.lexeme);
+}
+
+// SONNY-2768: every \\u escape takes exactly four ASCII hex digits. Each bad
+// byte is tried at every one of the four positions, in a lone escape and in
+// the low half of a surrogate pair.
+const sonny2768_bad_bytes = "+-_gGxXz .";
+
+fn sonny2768BadInputs(comptime template: []const u8, comptime hex_at: usize) [sonny2768_bad_bytes.len * 4][template.len]u8 {
+    var out: [sonny2768_bad_bytes.len * 4][template.len]u8 = undefined;
+    for (sonny2768_bad_bytes, 0..) |b, bi| {
+        for (0..4) |pos| {
+            out[bi * 4 + pos] = template[0..template.len].*;
+            out[bi * 4 + pos][hex_at + pos] = b;
+        }
+    }
+    return out;
+}
+
+fn expectTokenizeInvalidEscape(input: []const u8) !void {
+    {
+        var t = Tokenizer.init(std.testing.allocator, input, .{});
+        defer t.deinit();
+        try std.testing.expectError(error.InvalidEscape, t.next());
+    }
+    {
+        var reader: std.Io.Reader = .fixed(input);
+        var t = try readerTokenizer(std.testing.allocator, &reader, .{});
+        defer t.deinit();
+        try std.testing.expectError(error.InvalidEscape, t.next());
+    }
+}
+
+fn expectTokenizeString(input: []const u8, want: []const u8) !void {
+    {
+        var t = Tokenizer.init(std.testing.allocator, input, .{});
+        defer t.deinit();
+        const tok = try t.next();
+        try std.testing.expectEqual(TokenType.string, tok.type);
+        try std.testing.expectEqualStrings(want, tok.bytes);
+    }
+    {
+        var reader: std.Io.Reader = .fixed(input);
+        var t = try readerTokenizer(std.testing.allocator, &reader, .{});
+        defer t.deinit();
+        const tok = try t.next();
+        try std.testing.expectEqual(TokenType.string, tok.type);
+        try std.testing.expectEqualStrings(want, tok.bytes);
+    }
+}
+
+test "SONNY-2768: tokenizers reject signed and underscored \\u escapes" {
+    for ([_][]const u8{ "\"\\u+041\"", "\"\\u0_41\"", "\"\\u-000\"" }) |in| {
+        try expectTokenizeInvalidEscape(in);
+    }
+}
+
+test "SONNY-2768: tokenizers reject a non-hex byte at every \\u position" {
+    const lone = comptime sonny2768BadInputs("\"\\u0041\"", 3);
+    for (&lone) |*in| try expectTokenizeInvalidEscape(in);
+    const pair = comptime sonny2768BadInputs("\"\\uD83D\\uDE00\"", 9);
+    for (&pair) |*in| try expectTokenizeInvalidEscape(in);
+}
+
+test "SONNY-2768: tokenizers accept upper, lower and mixed case \\u hex" {
+    try expectTokenizeString("\"\\u00e9\\u00E9\"", "\xC3\xA9\xC3\xA9");
+    try expectTokenizeString("\"\\uABCD\\uabcd\\uAbCd\"", "\xEA\xAF\x8D" ** 3);
+    try expectTokenizeString("\"\\ud83d\\ude00\\uD83D\\uDE00\\uD83d\\uDe00\"", "\xF0\x9F\x98\x80" ** 3);
 }

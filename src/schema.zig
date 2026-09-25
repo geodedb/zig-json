@@ -14,6 +14,7 @@ const json = @import("json.zig");
 const pointer = @import("pointer.zig");
 const regex_mod = @import("regex_ecma262.zig");
 const number_mod = @import("number.zig");
+const unicode = @import("unicode.zig");
 const uri_mod = @import("uri");
 
 const Value = json.Value;
@@ -1100,8 +1101,8 @@ fn decodePointerSegment(segment: []const u8, buf: []u8) ?[]const u8 {
             }
         } else if (i + 2 < segment.len and segment[i] == '%') {
             // Handle percent-encoding (e.g., %25 -> %)
-            const hex = segment[i + 1 .. i + 3];
-            buf[out_idx] = std.fmt.parseInt(u8, hex, 16) catch {
+            const hex = segment[i + 1 ..][0..2];
+            buf[out_idx] = unicode.parseHex2(hex) orelse {
                 buf[out_idx] = segment[i];
                 i += 1;
                 out_idx += 1;
@@ -2338,4 +2339,14 @@ fn buildDeepXInstance(allocator: std.mem.Allocator, levels: usize) !Value {
 test "fips-exempt annotation present on schema ref-cache Wyhash site" {
     const src = @embedFile("schema.zig");
     try std.testing.expect(std.mem.indexOf(u8, src, "fips-exempt: non-security — JSON-Schema $ref cache key") != null);
+}
+
+test "SONNY-2768: pointer %XX decoding takes exactly two hex digits" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("a%b", decodePointerSegment("a%25b", &buf).?);
+    try std.testing.expectEqualStrings("aJb", decodePointerSegment("a%4ab", &buf).?);
+    // A sign or separator is not a hex digit, so the '%' stays literal.
+    try std.testing.expectEqualStrings("a%+1b", decodePointerSegment("a%+1b", &buf).?);
+    try std.testing.expectEqualStrings("a%_1b", decodePointerSegment("a%_1b", &buf).?);
+    try std.testing.expectEqualStrings("a%-0b", decodePointerSegment("a%-0b", &buf).?);
 }

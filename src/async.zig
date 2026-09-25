@@ -17,6 +17,7 @@ const std = @import("std");
 const json = @import("json.zig");
 const tokenizer_mod = @import("tokenizer.zig");
 const number_mod = @import("number.zig");
+const unicode = @import("unicode.zig");
 
 /// Async parser state
 pub const AsyncState = enum {
@@ -745,7 +746,7 @@ pub const AsyncParser = struct {
                             return error.InvalidEscape;
                         }
                         const hex = self.input.items[self.pos..][0..4];
-                        const cp = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidEscape;
+                        const cp = unicode.parseHex4(hex) orelse return error.InvalidEscape;
                         self.pos += 4;
                         self.col += 4;
                         self.bytes_since_yield += 4;
@@ -1673,4 +1674,32 @@ test "AsyncIterator on incomplete input yields nothing (GAP-008)" {
     try iter.addInput("[1, 2"); // never closed
 
     try std.testing.expect(iter.next() == null);
+}
+
+test "SONNY-2768: AsyncParser rejects \\u escapes that are not four hex digits" {
+    const allocator = std.testing.allocator;
+    const bad = [_][]const u8{
+        "\"\\u+041\"", "\"\\u0_41\"", "\"\\u-000\"", "\"\\u004_\"",
+        "\"\\u_041\"", "\"\\u00+1\"", "\"\\u004g\"", "\"\\uG041\"",
+    };
+    for (bad) |in| {
+        var parser = AsyncParser.init(allocator, .{});
+        defer parser.deinit();
+        try parser.addInput(in);
+        parser.endInput();
+        const result = parser.parse();
+        if (result == .completed) allocator.free(result.completed.str);
+        try std.testing.expect(result == .err);
+        try std.testing.expectEqual(ParseError.ErrorCode.invalid_escape, result.err.code);
+    }
+    for ([_][]const u8{ "\"\\u00e9\"", "\"\\u00E9\"" }) |in| {
+        var parser = AsyncParser.init(allocator, .{});
+        defer parser.deinit();
+        try parser.addInput(in);
+        parser.endInput();
+        const result = parser.parse();
+        try std.testing.expect(result == .completed);
+        defer allocator.free(result.completed.str);
+        try std.testing.expectEqualStrings("\xC3\xA9", result.completed.str);
+    }
 }

@@ -348,7 +348,7 @@ const Parser = struct {
         }
 
         const hex = self.input[self.pos..][0..2];
-        const byte = std.fmt.parseInt(u8, hex, 16) catch {
+        const byte = unicode.parseHex2(hex) orelse {
             self.setError(.InvalidEscape);
             return error.JsonParse;
         };
@@ -544,7 +544,7 @@ const Parser = struct {
         }
 
         const hex = self.input[self.pos..][0..4];
-        const cp1 = std.fmt.parseInt(u16, hex, 16) catch {
+        const cp1 = unicode.parseHex4(hex) orelse {
             self.setError(.InvalidEscape);
             return error.JsonParse;
         };
@@ -567,7 +567,7 @@ const Parser = struct {
             self.col += 2;
 
             const hex2 = self.input[self.pos..][0..4];
-            const cp2 = std.fmt.parseInt(u16, hex2, 16) catch {
+            const cp2 = unicode.parseHex4(hex2) orelse {
                 self.setError(.InvalidEscape);
                 return error.JsonParse;
             };
@@ -1527,5 +1527,97 @@ test "parse-throughput micro-bench (flag-gated)" {
         }
         try buf.append(a, ']');
         try benchCorpus(a, "small-objects", buf.items, 2000);
+    }
+}
+
+// SONNY-2768: every \\u escape takes exactly four ASCII hex digits. Each bad
+// byte is tried at every one of the four positions, in a lone escape and in
+// the low half of a surrogate pair.
+const sonny2768_bad_bytes = "+-_gGxXz .";
+
+fn sonny2768BadInputs(comptime template: []const u8, comptime hex_at: usize) [sonny2768_bad_bytes.len * 4][template.len]u8 {
+    var out: [sonny2768_bad_bytes.len * 4][template.len]u8 = undefined;
+    for (sonny2768_bad_bytes, 0..) |b, bi| {
+        for (0..4) |pos| {
+            out[bi * 4 + pos] = template[0..template.len].*;
+            out[bi * 4 + pos][hex_at + pos] = b;
+        }
+    }
+    return out;
+}
+
+fn expectParseInvalidEscape(input: []const u8, opts: ParseOptions) !void {
+    var err = ParseError.init();
+    const result = parse(std.testing.allocator, input, opts, &err);
+    if (result) |doc_const| {
+        var doc = doc_const;
+        doc.deinit();
+        std.debug.print("accepted invalid escape: {s}\n", .{input});
+        return error.TestUnexpectedResult;
+    } else |e| {
+        try std.testing.expectEqual(error.JsonParse, e);
+        try std.testing.expectEqual(ErrorCode.InvalidEscape, err.code);
+    }
+    // JSON5 single-quoted strings decode escapes on their own path.
+    if (opts.json5 and input.len <= 64 and input[0] == '"') {
+        var single: [64]u8 = undefined;
+        @memcpy(single[0..input.len], input);
+        single[0] = '\'';
+        single[input.len - 1] = '\'';
+        try expectParseInvalidEscape(single[0..input.len], opts);
+    }
+}
+
+test "SONNY-2768: parser rejects signed and underscored \\u escapes" {
+    for ([_][]const u8{ "\"\\u+041\"", "\"\\u0_41\"", "\"\\u-000\"" }) |in| {
+        try expectParseInvalidEscape(in, .{});
+        try expectParseInvalidEscape(in, .{ .json5 = true });
+    }
+}
+
+test "SONNY-2768: parser rejects a non-hex byte at every \\u position" {
+    const lone = comptime sonny2768BadInputs("\"\\u0041\"", 3);
+    for (&lone) |*in| {
+        try expectParseInvalidEscape(in, .{});
+        try expectParseInvalidEscape(in, .{ .json5 = true });
+    }
+    const pair = comptime sonny2768BadInputs("\"\\uD83D\\uDE00\"", 9);
+    for (&pair) |*in| {
+        try expectParseInvalidEscape(in, .{});
+        try expectParseInvalidEscape(in, .{ .json5 = true });
+    }
+}
+
+test "SONNY-2768: JSON5 \\x escape takes exactly two hex digits" {
+    for ([_][]const u8{ "'\\x+1'", "'\\x-0'", "'\\x_1'", "'\\x1_'", "'\\x1g'" }) |in| {
+        try expectParseInvalidEscape(in, .{ .json5 = true });
+    }
+    var err = ParseError.init();
+    var doc = try parse(std.testing.allocator, "'\\x4a\\x4A'", .{ .json5 = true }, &err);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("JJ", doc.root.str);
+}
+
+test "SONNY-2768: parser accepts upper, lower and mixed case \\u hex" {
+    const cases = [_]struct { in: []const u8, want: []const u8 }{
+        .{ .in = "\"\\u00e9\\u00E9\"", .want = "\xC3\xA9\xC3\xA9" },
+        .{ .in = "\"\\uABCD\\uabcd\\uAbCd\"", .want = "\xEA\xAF\x8D\xEA\xAF\x8D\xEA\xAF\x8D" },
+        .{ .in = "\"\\ud83d\\ude00\\uD83D\\uDE00\\uD83d\\uDe00\"", .want = "\xF0\x9F\x98\x80" ** 3 },
+    };
+    for (cases) |c| {
+        for ([_]ParseOptions{ .{}, .{ .json5 = true } }) |opts| {
+            var err = ParseError.init();
+            var doc = try parse(std.testing.allocator, c.in, opts, &err);
+            defer doc.deinit();
+            try std.testing.expectEqualStrings(c.want, doc.root.str);
+        }
+        var single: [64]u8 = undefined;
+        @memcpy(single[0..c.in.len], c.in);
+        single[0] = '\'';
+        single[c.in.len - 1] = '\'';
+        var err = ParseError.init();
+        var doc = try parse(std.testing.allocator, single[0..c.in.len], .{ .json5 = true }, &err);
+        defer doc.deinit();
+        try std.testing.expectEqualStrings(c.want, doc.root.str);
     }
 }

@@ -7,6 +7,34 @@
 
 const std = @import("std");
 
+/// Value of one ASCII hex digit (0-9, a-f, A-F), or null for any other byte.
+pub fn hexDigitValue(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @intCast(c - '0'),
+        'a'...'f' => @intCast(c - 'a' + 10),
+        'A'...'F' => @intCast(c - 'A' + 10),
+        else => null,
+    };
+}
+
+/// Decodes the four hex digits of a `\uXXXX` escape. Every byte must be an
+/// ASCII hex digit, as RFC 8259 requires. Unlike std.fmt.parseInt this rejects
+/// a leading sign and `_` digit separators, so "+041", "0_41" and "-000" are
+/// not accepted (SONNY-2768).
+pub fn parseHex4(hex: *const [4]u8) ?u16 {
+    var v: u16 = 0;
+    for (hex) |c| v = (v << 4) | (hexDigitValue(c) orelse return null);
+    return v;
+}
+
+/// Decodes exactly two ASCII hex digits (JSON5 `\xNN`, `%NN`). Same strictness
+/// as parseHex4.
+pub fn parseHex2(hex: *const [2]u8) ?u8 {
+    var v: u8 = 0;
+    for (hex) |c| v = (v << 4) | (hexDigitValue(c) orelse return null);
+    return v;
+}
+
 /// Get the expected length of a UTF-8 sequence from its first byte
 pub fn utf8SeqLen(first: u8) !usize {
     if (first < 0x80) return 1;
@@ -155,4 +183,25 @@ test "encode utf8" {
 test "count codepoints" {
     try std.testing.expectEqual(@as(usize, 5), try countCodepoints("hello"));
     try std.testing.expectEqual(@as(usize, 1), try countCodepoints("\xF0\x9F\x98\x80")); // emoji
+}
+
+test "parseHex4 accepts exactly four hex digits (SONNY-2768)" {
+    try std.testing.expectEqual(@as(?u16, 0x0041), parseHex4("0041"));
+    try std.testing.expectEqual(@as(?u16, 0xABCD), parseHex4("ABCD"));
+    try std.testing.expectEqual(@as(?u16, 0xABCD), parseHex4("abcd"));
+    try std.testing.expectEqual(@as(?u16, 0xABCD), parseHex4("aBcD"));
+    try std.testing.expectEqual(@as(?u16, 0xFFFF), parseHex4("FFFF"));
+    try std.testing.expectEqual(@as(?u16, 0), parseHex4("0000"));
+    const bad = [_]*const [4]u8{
+        "+041", "-000", "-041", "_041", "0_41", "00_1", "004_",
+        "0+41", "004-", "004g", "G041", "0x41", " 041", "004 ",
+    };
+    for (bad) |h| try std.testing.expectEqual(@as(?u16, null), parseHex4(h));
+}
+
+test "parseHex2 accepts exactly two hex digits (SONNY-2768)" {
+    try std.testing.expectEqual(@as(?u8, 0x4a), parseHex2("4a"));
+    try std.testing.expectEqual(@as(?u8, 0x4a), parseHex2("4A"));
+    const bad = [_]*const [2]u8{ "+1", "-0", "_1", "1_", "1g", "zz" };
+    for (bad) |h| try std.testing.expectEqual(@as(?u8, null), parseHex2(h));
 }
