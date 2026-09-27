@@ -27,7 +27,10 @@ include:
   - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.54.0
 
   # Release
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.54.0
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.54.6
+    inputs:
+      release_auth: job_token
+      tags: ["company", "linux"]
   - component: gitlab.com/devnw/ci-catalog/zig-version-tag-check@v1.54.0
 
 variables:
@@ -225,16 +228,3 @@ fuzz:
 # =============================================================================
 # Release
 # =============================================================================
-
-# SONNY-2447: create-release (release-semantic component) publishes the GitLab
-# Release with the native `release:` keyword, which the runner executes with
-# glab. glab logs in with the job token but prefers a GITLAB_TOKEN environment
-# variable, and the one the devnw group exports lacks api scope, so every
-# POST .../releases failed with 403 insufficient_scope (no release after
-# v0.1.3). Blank it for this job (same job name, so these keys merge into the
-# component's job) to leave glab on the job token. GitLab gives group and
-# project CI/CD variables precedence over job variables, though: if the 403
-# persists, the group variable has to be scoped away from this job instead.
-create-release:
-  variables:
-    GITLAB_TOKEN: ""
