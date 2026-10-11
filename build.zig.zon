@@ -1,12 +1,12 @@
 .{
     .name = .json,
-    .version = "0.1.18",
+    .version = "0.1.19",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x6b072545e19eebb4,
     .dependencies = .{
         .uri = .{
-            .url = "git+https://gitlab.com/devnw/zig/uri.git?ref=v0.1.14#a1cc36d32143805102bfff63e41bae4725dd7f02",
-            .hash = "uri-0.1.14-zVvOseGkAgD4827wHP7W6dx2dTEebtBytjX7qNqQoYWw",
+            .url = "git+https://gitlab.com/devnw/zig/uri.git?ref=v0.1.15#20c47607f3b76695c26a2062a0a4c4888b202f3f",
+            .hash = "uri-0.1.15-zVvOseGkAgCBfelE6RZdHPLfhnkEFPxnrndSIYe3aPQh",
         },
         .thread_pool = .{
             .url = "git+https://gitlab.com/devnw/zig/thread-pool.git?ref=v0.2.8#2161d8e77beb6f9d6d8664b4406c739ef3a6cc81",
