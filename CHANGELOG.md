@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-10-11
+
+### Changed
+
+- uri v0.1.15 and thread-pool v0.2.8 (single thread-pool in the graph).
+
 ## [0.1.7] - 2026-06-12
 
 Reconciles a parallel remediation branch onto the v0.1.6 release, adding
