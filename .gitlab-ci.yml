@@ -11,20 +11,35 @@ default:
   tags:
     - company
     - linux
+    - x86
 
 include:
   # Security scanning
   - component: gitlab.com/devnw/ci-catalog/security-sast@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
 
   # Code quality
   - component: gitlab.com/devnw/ci-catalog/zig-format@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
 
   # SBOM
   - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
 
   # Release
   # release-semantic: commit that ci-catalog tag v1.55.6 resolved to
@@ -32,8 +47,10 @@ include:
   - component: gitlab.com/devnw/ci-catalog/release-semantic@ec7cf51d24c8dce002f44a084ddacc8c829d27f7
     inputs:
       release_auth: job_token
-      tags: ["company", "linux"]
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/zig-version-tag-check@v1.55.6
+    inputs:
+      tags: ["company", "linux", "x86"]
 
 variables:
   ZIG_VERSION: "0.16.0"
@@ -49,7 +66,7 @@ stages:
 
 # Zig installation template (SEC-R6-02: SHA-256 verified via ziglang.org index)
 .install-zig: &install-zig
-  - apt-get update && apt-get install -y curl xz-utils python3
+  - apt-get update && apt-get install -y curl xz-utils python3 git
   - |
     if [ ! -f "zig-${ZIG_VERSION}/zig" ]; then
       ARCH=$(uname -m)
@@ -230,3 +247,25 @@ fuzz:
 # =============================================================================
 # Release
 # =============================================================================
+
+# SONNY-4778: tools must not redirect Git operations into this worktree.
+hook-env-regression:
+  stage: lint
+  image: python:3.14-slim-bookworm
+  tags: [company, linux, x86]
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends git
+  script:
+    - python3 scripts/test_hook_env.py
+
+# Exercise the archive consumers receive after Zig applies manifest .paths.
+test-source-package:
+  stage: test
+  image: debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+  before_script:
+    - *install-zig
+  script:
+    - python3 scripts/check_source_package.py --jobs 2
+  needs: []
+  dependencies: []
+  allow_failure: false
