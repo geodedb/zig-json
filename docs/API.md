@@ -287,7 +287,11 @@ pub fn unmarshal(
 ) UnmarshalError!T
 ```
 
-Parse JSON and decode into a Zig type:
+Parse JSON and decode into a Zig type. Missing fields with pointer-bearing defaults
+are deep-cloned into the supplied allocator (including nested slices, structs,
+arrays, optionals and tagged unions), so defaults and decoded fields share the
+`json.free` ownership contract. Allocation failures from parsing, binary decoding,
+and custom unmarshaling propagate as `error.OutOfMemory`, not format errors.
 
 ```zig
 const Person = struct {
@@ -303,7 +307,11 @@ std.debug.print("Name: {s}, Age: {d}\n", .{p.name, p.age.?});
 
 ### `unmarshalWithInfo`
 
-Returns detailed error information with JSON Pointer paths:
+Returns detailed error information with JSON Pointer paths. Allocation failure is
+reported as `.err.kind = .out_of_memory`, with an empty path and a static message;
+reporting OOM does not allocate. The existing `UnmarshalResult(T)` tagged-result
+shape is retained (this function does not return an error union). Callers with
+exhaustive switches on `UnmarshalErrorKind` must handle `.out_of_memory`.
 
 ```zig
 pub fn unmarshalWithInfo(

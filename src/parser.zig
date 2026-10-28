@@ -190,7 +190,7 @@ const Parser = struct {
         return switch (c) {
             'n' => self.parseNull(),
             't', 'f' => self.parseBool(),
-            '"' => self.parseString(),
+            '"' => if (self.opts.json5) self.parseString5() else self.parseString(),
             '\'' => if (self.opts.json5) self.parseString5() else {
                 self.setError(.UnexpectedToken);
                 return error.JsonParse;
@@ -246,13 +246,14 @@ const Parser = struct {
     }
 
     fn parseString5(self: *Parser) !Value {
-        // JSON5: Single-quoted strings
+        // JSON5 escapes apply to both quote styles.
         const str = try self.parseStringRaw5();
         return .{ .str = str };
     }
 
     fn parseStringRaw5(self: *Parser) ![]const u8 {
-        if (self.peek() != '\'') {
+        const quote = self.peek() orelse return error.JsonParse;
+        if (quote != '\'' and quote != '"') {
             self.setError(.UnexpectedToken);
             return error.JsonParse;
         }
@@ -262,7 +263,7 @@ const Parser = struct {
         errdefer result.deinit(self.alloc());
 
         while (self.peek()) |c| {
-            if (c == '\'') {
+            if (c == quote) {
                 self.advance();
                 return result.toOwnedSlice(self.alloc());
             }
@@ -666,7 +667,8 @@ const Parser = struct {
                     self.setError(.InvalidNumber);
                     return error.JsonParse;
                 };
-                const num = number_mod.parseNumber(try self.alloc().dupe(u8, decimal_str), self.alloc()) catch {
+                const num = number_mod.parseNumber(try self.alloc().dupe(u8, decimal_str), self.alloc()) catch |e| {
+                    if (e == error.OutOfMemory) return error.OutOfMemory;
                     self.setError(.InvalidNumber);
                     return error.JsonParse;
                 };
@@ -696,7 +698,8 @@ const Parser = struct {
             }
             const lexeme = self.input[start..self.pos];
             const lexeme_copy = try self.alloc().dupe(u8, lexeme);
-            const num = number_mod.parseNumber(lexeme_copy, self.alloc()) catch {
+            const num = number_mod.parseNumber(lexeme_copy, self.alloc()) catch |e| {
+                if (e == error.OutOfMemory) return error.OutOfMemory;
                 self.setError(.InvalidNumber);
                 return error.JsonParse;
             };
@@ -756,7 +759,8 @@ const Parser = struct {
         const lexeme = self.input[start..self.pos];
         const lexeme_copy = try self.alloc().dupe(u8, lexeme);
 
-        const num = number_mod.parseNumber(lexeme_copy, self.alloc()) catch {
+        const num = number_mod.parseNumber(lexeme_copy, self.alloc()) catch |e| {
+            if (e == error.OutOfMemory) return error.OutOfMemory;
             self.setError(.InvalidNumber);
             return error.JsonParse;
         };
@@ -877,7 +881,7 @@ const Parser = struct {
                     return error.JsonParse;
                 };
                 if (c == '"') {
-                    break :blk try self.parseStringRaw();
+                    break :blk if (self.opts.json5) try self.parseStringRaw5() else try self.parseStringRaw();
                 } else if (c == '\'' and self.opts.json5) {
                     break :blk try self.parseStringRaw5();
                 } else if (self.opts.json5 and isIdentStart(c)) {

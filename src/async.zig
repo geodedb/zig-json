@@ -746,23 +746,26 @@ pub const AsyncParser = struct {
                             return error.InvalidEscape;
                         }
                         const hex = self.input.items[self.pos..][0..4];
-                        const cp = unicode.parseHex4(hex) orelse return error.InvalidEscape;
-                        self.pos += 4;
-                        self.col += 4;
-                        self.bytes_since_yield += 4;
-                        self.total_bytes_processed += 4;
+                        var cp: u21 = unicode.parseHex4(hex) orelse return error.InvalidEscape;
+                        for (0..4) |_| self.advance();
 
-                        // Handle codepoint
-                        if (cp < 0x80) {
-                            try result.append(self.allocator, @intCast(cp));
-                        } else if (cp < 0x800) {
-                            try result.append(self.allocator, @intCast(0xC0 | (cp >> 6)));
-                            try result.append(self.allocator, @intCast(0x80 | (cp & 0x3F)));
-                        } else {
-                            try result.append(self.allocator, @intCast(0xE0 | (cp >> 12)));
-                            try result.append(self.allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
-                            try result.append(self.allocator, @intCast(0x80 | (cp & 0x3F)));
+                        // SONNY-2780: combine UTF-16 pairs before encoding UTF-8.
+                        // A surrogate on its own is not a Unicode scalar value.
+                        if (cp >= 0xD800 and cp <= 0xDBFF) {
+                            if (self.input.items.len - self.pos < 6 or
+                                self.input.items[self.pos] != '\\' or
+                                self.input.items[self.pos + 1] != 'u') return error.InvalidEscape;
+                            const low = unicode.parseHex4(self.input.items[self.pos + 2 ..][0..4]) orelse
+                                return error.InvalidEscape;
+                            if (low < 0xDC00 or low > 0xDFFF) return error.InvalidEscape;
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                            for (0..6) |_| self.advance();
+                        } else if (cp >= 0xDC00 and cp <= 0xDFFF) {
+                            return error.InvalidEscape;
                         }
+                        var encoded: [4]u8 = undefined;
+                        const len = unicode.encodeUtf8(cp, &encoded) catch return error.InvalidEscape;
+                        try result.appendSlice(self.allocator, encoded[0..len]);
                         continue;
                     },
                     else => return error.InvalidEscape,
@@ -1701,5 +1704,18 @@ test "SONNY-2768: AsyncParser rejects \\u escapes that are not four hex digits" 
         try std.testing.expect(result == .completed);
         defer allocator.free(result.completed.str);
         try std.testing.expectEqualStrings("\xC3\xA9", result.completed.str);
+    }
+}
+
+// SONNY-2780: escaped UTF-16 pairs must produce scalar UTF-8, not CESU-8.
+test "SONNY-2780 async surrogate pairs and invalid halves" {
+    const allocator = std.testing.allocator;
+    const value = try parseAsync(allocator, "\"\\uD83D\\uDE00\"", .{}, null);
+    defer freeValue(allocator, value);
+    try std.testing.expectEqualStrings("\xF0\x9F\x98\x80", value.str);
+    for ([_][]const u8{
+        "\"\\uD83D\"", "\"\\uDE00\"", "\"\\uD83D\\u0041\"", "\"\\uD83D\\uD83D\"",
+    }) |input| {
+        try std.testing.expectError(error.InvalidEscape, parseAsync(allocator, input, .{}, null));
     }
 }

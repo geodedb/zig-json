@@ -301,3 +301,21 @@ test "value equality" {
     // Objects with same content (different order) should be equal
     try std.testing.expect(doc1.root.eql(doc2.root));
 }
+
+test "SONNY-2780 JSON5 escapes work in either string quote style" {
+    for ([_][]const u8{
+        "\"\\x41\"", "'\\x41'", "{\"\\x41\": \"\\x42\"}", "{'\\x41': '\\x42'}",
+    }) |input| {
+        var err = json.ParseError.init();
+        var doc = try json.parse(std.testing.allocator, input, .{ .json5 = true }, &err);
+        defer doc.deinit();
+        if (doc.root == .str) {
+            try std.testing.expectEqualStrings("A", doc.root.str);
+        } else {
+            try std.testing.expectEqualStrings("A", doc.root.obj[0].k);
+            try std.testing.expectEqualStrings("B", doc.root.obj[0].v.str);
+        }
+    }
+    var err = json.ParseError.init();
+    try std.testing.expectError(error.JsonParse, json.parse(std.testing.allocator, "\"\\x41\"", .{}, &err));
+}

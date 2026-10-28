@@ -2350,3 +2350,11 @@ test "SONNY-2768: pointer %XX decoding takes exactly two hex digits" {
     try std.testing.expectEqualStrings("a%_1b", decodePointerSegment("a%_1b", &buf).?);
     try std.testing.expectEqualStrings("a%-0b", decodePointerSegment("a%-0b", &buf).?);
 }
+
+test "SONNY-2780 pointer percent escape at end of segment" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("%", decodePointerSegment("%25", &buf).?);
+    try std.testing.expectEqualStrings("a/", decodePointerSegment("a%2F", &buf).?);
+    try std.testing.expectEqualStrings("a%", decodePointerSegment("a%", &buf).?);
+    try std.testing.expectEqualStrings("a%2", decodePointerSegment("a%2", &buf).?);
+}

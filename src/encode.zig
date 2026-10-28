@@ -1286,6 +1286,8 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
             if (u.tag_type) |_| {
                 const tag_name = @tagName(value);
                 var members = try allocator.alloc(Member, 1);
+                @memset(members, .{ .k = "", .v = .null });
+                errdefer freeValue(allocator, .{ .obj = members });
                 members[0].k = try allocator.dupe(u8, tag_name);
 
                 inline for (u.fields) |field| {
@@ -1320,6 +1322,8 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
 
             if (s.is_tuple) {
                 var arr = try allocator.alloc(Value, s.fields.len);
+                @memset(arr, .null);
+                errdefer freeValue(allocator, .{ .arr = arr });
                 inline for (s.fields, 0..) |field, i| {
                     arr[i] = try toValueInternal(allocator, @field(value, field.name), options, depth + 1);
                 }
@@ -1353,8 +1357,9 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                         count += 1;
                     }
                 }
-
                 var members = try allocator.alloc(Member, count);
+                @memset(members, .{ .k = "", .v = .null });
+                errdefer freeValue(allocator, .{ .obj = members });
                 var idx: usize = 0;
                 inline for (s.fields) |field| {
                     if (field.name.len > 0 and field.name[0] == '_') continue;
@@ -1400,6 +1405,8 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                 return .{ .str = try allocator.dupe(u8, &value) };
             } else {
                 var vals = try allocator.alloc(Value, arr.len);
+                @memset(vals, .null);
+                errdefer freeValue(allocator, .{ .arr = vals });
                 for (&value, 0..) |item, i| {
                     vals[i] = try toValueInternal(allocator, item, options, depth + 1);
                 }
@@ -1421,6 +1428,8 @@ fn toValueInternal(allocator: std.mem.Allocator, value: anytype, options: Encode
                         return .{ .str = try allocator.dupe(u8, value) };
                     } else {
                         var vals = try allocator.alloc(Value, value.len);
+                        @memset(vals, .null);
+                        errdefer freeValue(allocator, .{ .arr = vals });
                         for (value, 0..) |item, i| {
                             vals[i] = try toValueInternal(allocator, item, options, depth + 1);
                         }
@@ -2978,6 +2987,8 @@ test "encode with custom marshaler" {
         // Custom marshaler: encode as [x, y] array instead of object
         pub fn jsonMarshal(self: @This(), allocator: std.mem.Allocator) !Value {
             var arr = try allocator.alloc(Value, 2);
+            @memset(arr, .null);
+            errdefer freeValue(allocator, .{ .arr = arr });
             arr[0] = try toValue(allocator, self.x, .{});
             arr[1] = try toValue(allocator, self.y, .{});
             return .{ .arr = arr };
@@ -3491,12 +3502,9 @@ test "toValue deeply nested json.Value returns DepthLimit (no crash)" {
     const v = try buildNestedValueArray(a, 100_000, .null);
     defer freeNestedValueArray(a, v);
 
-    // toValue builds an owned tree; on the error path it leaves the partial
-    // tree allocated (the caller owns cleanup), so use an arena to reclaim it.
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-
-    try std.testing.expectError(error.DepthLimit, toValue(arena.allocator(), v, .{}));
+    // Every partially constructed tree must be reclaimed on DepthLimit as
+    // well as OutOfMemory; use the leak-checking allocator directly.
+    try std.testing.expectError(error.DepthLimit, toValue(a, v, .{}));
 }
 
 test "encode cyclic pointer graph returns DepthLimit (no crash)" {
@@ -3525,4 +3533,26 @@ test "encode respects custom max_depth" {
     const result = try encode(a, v, .{ .max_depth = 64 });
     defer a.free(result);
     try std.testing.expect(result.len > 0);
+}
+
+fn allocationTrees2449(a: std.mem.Allocator) !void {
+    const Inner = struct { text: []const u8 };
+    const Outer = struct {
+        inner: Inner,
+        items: []const []const u8,
+        pub const json_config = .{ .inner = FieldConfig{ .@"inline" = true } };
+    };
+    const object = try toValue(a, Outer{ .inner = .{ .text = "text" }, .items = &.{ "a", "b" } }, .{});
+    defer freeValue(a, object);
+    const tuple = try toValue(a, .{ "a", @as(u32, 42) }, .{});
+    defer freeValue(a, tuple);
+    const array = try toValue(a, [_][]const u8{ "a", "b" }, .{});
+    defer freeValue(a, array);
+    const Choice = union(enum) { text: []const u8, empty: void };
+    const choice = try toValue(a, Choice{ .text = "value" }, .{});
+    defer freeValue(a, choice);
+}
+
+test "SONNY-2449 toValue cleans up every partial tree allocation" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationTrees2449, .{});
 }

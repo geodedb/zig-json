@@ -57,6 +57,8 @@ pub const UnmarshalErrorKind = enum {
     integer_overflow,
     duplicate_field,
     json_parse,
+    /// Allocation failed while parsing, decoding, or building diagnostics.
+    out_of_memory,
 };
 
 /// Detailed unmarshal error with JSON Pointer path and context
@@ -92,10 +94,16 @@ pub fn UnmarshalResult(comptime T: type) type {
     };
 }
 
+/// OOM reporting must not itself require allocation.
+fn outOfMemoryInfo() UnmarshalErrorInfo {
+    return .{ .path = "", .kind = .out_of_memory, .message = "Out of memory", .found = null };
+}
+
 /// Helper to create an error with duped path (so path survives after defer frees original)
 fn makePathError(allocator: std.mem.Allocator, path: []const u8, kind: UnmarshalErrorKind, message: []const u8, expected: ?[]const u8, found: ?[]const u8) UnmarshalErrorInfo {
+    if (kind == .out_of_memory) return outOfMemoryInfo();
     return .{
-        .path = allocator.dupe(u8, path) catch "",
+        .path = allocator.dupe(u8, path) catch return outOfMemoryInfo(),
         .kind = kind,
         .message = message,
         .expected = expected,
@@ -121,7 +129,7 @@ pub const UnmarshalOptions = struct {
 /// Parse JSON string and unmarshal to type T
 pub fn unmarshal(comptime T: type, allocator: std.mem.Allocator, input: []const u8) UnmarshalError!T {
     var err = json.ParseError.init();
-    var doc = json.parse(allocator, input, .{}, &err) catch return error.JsonParse;
+    var doc = json.parse(allocator, input, .{}, &err) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.JsonParse;
     defer doc.deinit();
 
     return fromValue(T, allocator, doc.root);
@@ -140,7 +148,8 @@ pub fn fromValueWithOptions(comptime T: type, allocator: std.mem.Allocator, valu
 /// Parse JSON and unmarshal with detailed error information
 pub fn unmarshalWithInfo(comptime T: type, allocator: std.mem.Allocator, input: []const u8) UnmarshalResult(T) {
     var err = json.ParseError.init();
-    var doc = json.parse(allocator, input, .{}, &err) catch {
+    var doc = json.parse(allocator, input, .{}, &err) catch |e| {
+        if (e == error.OutOfMemory) return .{ .err = outOfMemoryInfo() };
         return .{ .err = .{
             .path = "",
             .kind = .json_parse,
@@ -173,7 +182,7 @@ fn fromValueInternal(comptime T: type, allocator: std.mem.Allocator, value: Valu
 
     // Check for custom unmarshaler first
     if (comptime encode_mod.hasJsonUnmarshal(T)) {
-        return T.jsonUnmarshal(allocator, value) catch return error.InvalidFormat;
+        return T.jsonUnmarshal(allocator, value) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.InvalidFormat;
     }
 
     switch (info) {
@@ -207,7 +216,7 @@ fn fromValueInternal(comptime T: type, allocator: std.mem.Allocator, value: Valu
                     if (ptr.child == u8) {
                         // String type - decode based on binary format
                         if (value != .str) return error.TypeMismatch;
-                        return decodeBinary(allocator, value.str, opts.default_binary_format) catch return error.InvalidFormat;
+                        return decodeBinarySlice(T, allocator, value.str, opts.default_binary_format);
                     } else {
                         // Array of other type
                         if (value != .arr) return error.TypeMismatch;
@@ -311,7 +320,8 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
 
     // Check for custom unmarshaler first
     if (comptime encode_mod.hasJsonUnmarshal(T)) {
-        const result = T.jsonUnmarshal(allocator, value) catch {
+        const result = T.jsonUnmarshal(allocator, value) catch |e| {
+            if (e == error.OutOfMemory) return .{ .err = outOfMemoryInfo() };
             return .{ .err = makePathError(allocator, path, .invalid_format, "Custom unmarshaler failed", @typeName(T), valueTypeName(value)) };
         };
         return .{ .ok = result };
@@ -366,7 +376,8 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                         if (value != .str) {
                             return .{ .err = makePathError(allocator, path, .type_mismatch, "Type mismatch", "string", valueTypeName(value)) };
                         }
-                        const result = decodeBinary(allocator, value.str, opts.default_binary_format) catch {
+                        const result = decodeBinarySlice(T, allocator, value.str, opts.default_binary_format) catch |e| {
+                            if (e == error.OutOfMemory) return .{ .err = outOfMemoryInfo() };
                             return .{ .err = makePathError(allocator, path, .invalid_format, "Binary decode failed", null, null) };
                         };
                         return .{ .ok = result };
@@ -375,7 +386,7 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                             return .{ .err = makePathError(allocator, path, .type_mismatch, "Type mismatch", "array", valueTypeName(value)) };
                         }
                         var result = allocator.alloc(ptr.child, value.arr.len) catch {
-                            return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory", null, null) };
+                            return .{ .err = makePathError(allocator, path, .out_of_memory, "Out of memory", null, null) };
                         };
                         // This function returns a result union (not an error union),
                         // so errdefer does not fire on `.err` returns. Free the
@@ -386,7 +397,7 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                             const item_path = pointer.appendIndex(path, i, allocator) catch {
                                 for (result[0..built]) |*el| freeInternal(ptr.child, allocator, el);
                                 allocator.free(result);
-                                return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
+                                return .{ .err = makePathError(allocator, path, .out_of_memory, "Out of memory building path", null, null) };
                             };
                             defer allocator.free(item_path);
 
@@ -408,7 +419,7 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                 },
                 .one => {
                     const ptr_val = allocator.create(ptr.child) catch {
-                        return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory", null, null) };
+                        return .{ .err = makePathError(allocator, path, .out_of_memory, "Out of memory", null, null) };
                     };
                     errdefer allocator.destroy(ptr_val);
                     const child_result = fromValueInternalWithPath(ptr.child, allocator, value, opts, path);
@@ -457,7 +468,7 @@ fn fromValueInternalWithPath(comptime T: type, allocator: std.mem.Allocator, val
                 for (value.arr, 0..) |item, i| {
                     const item_path = pointer.appendIndex(path, i, allocator) catch {
                         for (result[0..built]) |*el| freeInternal(arr.child, allocator, el);
-                        return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
+                        return .{ .err = makePathError(allocator, path, .out_of_memory, "Out of memory building path", null, null) };
                     };
                     defer allocator.free(item_path);
 
@@ -655,7 +666,8 @@ fn unmarshalStruct(
             // Check if field has a default value
             if (comptime field.default_value_ptr) |default_ptr| {
                 const default_val: *const field.type = @ptrCast(@alignCast(default_ptr));
-                @field(result, field.name) = default_val.*;
+                @field(result, field.name) = try cloneDefault(field.type, allocator, default_val.*);
+                fields_owned[i] = true;
             } else if (comptime field_cfg.skip) {
                 // Skipped field without default - zero initialize
                 @field(result, field.name) = std.mem.zeroes(field.type);
@@ -1080,7 +1092,7 @@ fn unmarshalStructWithPath(
             } else if (matchFieldName(member.k, json_name, opts.match_case_insensitive)) {
                 const field_path = pointer.append(path, json_name, allocator) catch {
                     freePopulatedFields(T, s, allocator, &result, fields_owned);
-                    return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
+                    return .{ .err = makePathError(allocator, path, .out_of_memory, "Out of memory building path", null, null) };
                 };
                 defer allocator.free(field_path);
 
@@ -1113,7 +1125,11 @@ fn unmarshalStructWithPath(
         if (!fields_found[i]) {
             if (comptime field.default_value_ptr) |default_ptr| {
                 const default_val: *const field.type = @ptrCast(@alignCast(default_ptr));
-                @field(result, field.name) = default_val.*;
+                @field(result, field.name) = cloneDefault(field.type, allocator, default_val.*) catch {
+                    freePopulatedFields(T, s, allocator, &result, fields_owned);
+                    return .{ .err = outOfMemoryInfo() };
+                };
+                fields_owned[i] = true;
             } else if (comptime field_cfg.skip) {
                 @field(result, field.name) = std.mem.zeroes(field.type);
             } else if (@typeInfo(field.type) == .optional) {
@@ -1188,7 +1204,7 @@ fn tryUnmarshalInlineStructMemberWithPath(
             }
         } else if (matchFieldName(member.k, json_name, opts.match_case_insensitive)) {
             const field_path = pointer.append(path, json_name, allocator) catch {
-                return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
+                return .{ .err = makePathError(allocator, path, .out_of_memory, "Out of memory building path", null, null) };
             };
             defer allocator.free(field_path);
 
@@ -1230,7 +1246,7 @@ fn unmarshalTaggedUnionWithPath(
                 return .{ .ok = @unionInit(T, field.name, {}) };
             } else {
                 const field_path = pointer.append(path, field.name, allocator) catch {
-                    return .{ .err = makePathError(allocator, path, .type_mismatch, "Out of memory building path", null, null) };
+                    return .{ .err = makePathError(allocator, path, .out_of_memory, "Out of memory building path", null, null) };
                 };
                 defer allocator.free(field_path);
 
@@ -1385,6 +1401,86 @@ fn matchFieldName(json_key: []const u8, comptime field_name: []const u8, case_in
 // Memory freeing
 // ============================================================================
 
+fn decodeBinarySlice(comptime T: type, allocator: std.mem.Allocator, str: []const u8, format: BinaryFormat) UnmarshalError!T {
+    const bytes = try decodeBinary(allocator, str, format);
+    if (@typeInfo(T).pointer.sentinel()) |sentinel| {
+        defer allocator.free(bytes);
+        const result = try allocator.allocSentinel(u8, bytes.len, sentinel);
+        @memcpy(result, bytes);
+        return result;
+    }
+    return bytes;
+}
+
+// Default values may contain static pointers. Clone their native shape so the
+// same freeInternal contract applies to defaults and fields decoded from JSON.
+fn cloneDefault(comptime T: type, allocator: std.mem.Allocator, value: T) UnmarshalError!T {
+    switch (@typeInfo(T)) {
+        .pointer => |p| switch (p.size) {
+            .one => {
+                const result = try allocator.create(p.child);
+                errdefer allocator.destroy(result);
+                result.* = try cloneDefault(p.child, allocator, value.*);
+                return result;
+            },
+            .slice => {
+                const result = if (p.sentinel()) |sentinel|
+                    try allocator.allocSentinel(p.child, value.len, sentinel)
+                else
+                    try allocator.alloc(p.child, value.len);
+                var built: usize = 0;
+                errdefer {
+                    for (result[0..built]) |*item| freeInternal(p.child, allocator, item);
+                    allocator.free(result);
+                }
+                for (value, 0..) |item, i| {
+                    result[i] = try cloneDefault(p.child, allocator, item);
+                    built += 1;
+                }
+                return result;
+            },
+            else => return value,
+        },
+        .optional => |o| {
+            return if (value) |v| try cloneDefault(o.child, allocator, v) else null;
+        },
+        .@"struct" => |s| {
+            var result: T = undefined;
+            var owned = [_]bool{false} ** s.fields.len;
+            errdefer freePopulatedFields(T, s, allocator, &result, owned);
+            inline for (s.fields, 0..) |field, i| {
+                if (!field.is_comptime) {
+                    @field(result, field.name) = try cloneDefault(field.type, allocator, @field(value, field.name));
+                    owned[i] = true;
+                }
+            }
+            return result;
+        },
+        .array => |a| {
+            var result: T = undefined;
+            var built: usize = 0;
+            errdefer for (result[0..built]) |*item| freeInternal(a.child, allocator, item);
+            for (value, 0..) |item, i| {
+                result[i] = try cloneDefault(a.child, allocator, item);
+                built += 1;
+            }
+            return result;
+        },
+        .@"union" => |u| {
+            if (u.tag_type != null) {
+                inline for (u.fields) |field| {
+                    if (std.mem.eql(u8, @tagName(value), field.name)) {
+                        return @unionInit(T, field.name, try cloneDefault(field.type, allocator, @field(value, field.name)));
+                    }
+                }
+                unreachable;
+            }
+            return value;
+        },
+        else => return value,
+    }
+}
+
 fn freeInternal(comptime T: type, allocator: std.mem.Allocator, value: *T) void {
     const info = @typeInfo(T);
 
@@ -1397,14 +1493,8 @@ fn freeInternal(comptime T: type, allocator: std.mem.Allocator, value: *T) void 
             // such a field could be unmarshaled at all: json.free and the
             // ASR-011 cleanup instantiate this for every field.
             //
-            // Not every field json.free reaches was allocated by unmarshal,
-            // though. A field absent from the input keeps its struct default,
-            // which is static memory, and freeing it panics with "Invalid free":
-            // for example `[]const []const u8 = &.{ "a", "b" }`, the same
-            // pre-existing defect as a `[]const u8 = "dflt"` default. (The
-            // ASR-011 cleanup frees only the fields unmarshal populated, so it
-            // is unaffected.) Until that is fixed, decode such structs into an
-            // arena, or give their pointer fields only empty or null defaults.
+            // Missing fields now deep-clone their defaults before publication,
+            // so these pointers obey the same ownership contract as decoded fields.
             switch (ptr.size) {
                 .slice => {
                     if (ptr.child != u8) {
@@ -2472,4 +2562,133 @@ test "SONNY-2443: failures free the []const and *const fields already built (ASR
             },
         }
     }
+}
+
+const DefaultString2449 = struct { name: []const u8 = "dflt" };
+const DefaultSlices2449 = struct { names: []const []const u8 = &.{ "a", "b" } };
+
+test "SONNY-2449 string defaults own their memory" {
+    var value = try unmarshal(DefaultString2449, std.testing.allocator, "{}");
+    // Check ownership before calling free, so the baseline fails without an invalid free crash.
+    try std.testing.expect(value.name.ptr != (DefaultString2449{}).name.ptr);
+    defer free(DefaultString2449, std.testing.allocator, &value);
+    try std.testing.expectEqualStrings("dflt", value.name);
+}
+
+test "SONNY-2449 nested slice defaults own their memory" {
+    var value = try unmarshal(DefaultSlices2449, std.testing.allocator, "{}");
+    try std.testing.expect(value.names.ptr != (DefaultSlices2449{}).names.ptr);
+    defer free(DefaultSlices2449, std.testing.allocator, &value);
+    try std.testing.expect(value.names[0].ptr != (DefaultSlices2449{}).names[0].ptr);
+    try std.testing.expectEqualStrings("b", value.names[1]);
+}
+
+fn allocationDecode2449(a: std.mem.Allocator) !void {
+    var value = try unmarshal([]const u8, a, "\"value\"");
+    defer free([]const u8, a, &value);
+}
+fn allocationFromValue2449(a: std.mem.Allocator) !void {
+    var value = try fromValue([]const u8, a, .{ .str = "value" });
+    defer free([]const u8, a, &value);
+}
+
+test "SONNY-2449 unmarshal propagates allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationDecode2449, .{});
+}
+test "SONNY-2449 fromValue propagates allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFromValue2449, .{});
+}
+
+test "SONNY-2449 detailed unmarshal identifies OOM" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const result = unmarshalWithInfo([]const u8, failing.allocator(), "\"value\"");
+    try std.testing.expect(result == .err);
+    defer failing.allocator().free(result.err.path);
+    try std.testing.expectEqualStrings("out_of_memory", @tagName(result.err.kind));
+}
+
+const DefaultShapes2449 = struct {
+    const Nested = struct { text: []const u8 = "nested" };
+    pointer: *const Nested = &.{},
+    optional: ?[]const u8 = "optional",
+    nested: Nested = .{},
+    array: [2][]const u8 = .{ "first", "second" },
+    slice: []const []const u8 = &.{ "a", "b" },
+    sentinel: [:0]const u8 = "terminated",
+    choice: union(enum) { text: []const u8, empty: void } = .{ .text = "choice" },
+};
+
+fn allocationDefaults2449(a: std.mem.Allocator) !void {
+    var value = try unmarshal(DefaultShapes2449, a, "{}");
+    defer free(DefaultShapes2449, a, &value);
+    try std.testing.expect(value.pointer != (DefaultShapes2449{}).pointer);
+    try std.testing.expectEqualStrings("nested", value.pointer.text);
+    try std.testing.expectEqualStrings("optional", value.optional.?);
+    try std.testing.expectEqualStrings("choice", value.choice.text);
+    try std.testing.expectEqual(@as(u8, 0), value.sentinel[value.sentinel.len]);
+}
+
+fn allocationDetailedDefaults2449(a: std.mem.Allocator) !void {
+    switch (unmarshalWithInfo(DefaultShapes2449, a, "{}")) {
+        .ok => |decoded| {
+            var value = decoded;
+            defer free(DefaultShapes2449, a, &value);
+            try std.testing.expect(value.slice.ptr != (DefaultShapes2449{}).slice.ptr);
+        },
+        .err => |e| {
+            defer a.free(e.path);
+            if (e.kind == .out_of_memory) return error.OutOfMemory;
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+fn allocationDetailedPaths2449(a: std.mem.Allocator) !void {
+    const T = struct { names: []const []const u8, pointer: *const []const u8, array: [1][]const u8 };
+    switch (unmarshalWithInfo(T, a, "{\"names\":[\"a\",\"b\"],\"pointer\":\"c\",\"array\":[\"d\"]}")) {
+        .ok => |decoded| {
+            var value = decoded;
+            defer free(T, a, &value);
+        },
+        .err => |e| {
+            defer a.free(e.path);
+            if (e.kind == .out_of_memory) return error.OutOfMemory;
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "SONNY-2449 all native default shapes and rollback" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationDefaults2449, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationDetailedDefaults2449, .{});
+}
+
+test "SONNY-2449 detailed decode and path allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationDetailedPaths2449, .{});
+}
+
+test "SONNY-2449 defaults cleaned after later missing field" {
+    const T = struct { text: []const u8 = "owned", required: bool };
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.MissingField, unmarshal(T, a, "{}"));
+    const result = unmarshalWithInfo(T, a, "{}");
+    try std.testing.expect(result == .err);
+    defer a.free(result.err.path);
+    try std.testing.expectEqual(UnmarshalErrorKind.missing_field, result.err.kind);
+}
+
+fn allocationNumber2449(a: std.mem.Allocator) !void {
+    _ = try unmarshal(f64, a, "123.456");
+    switch (unmarshalWithInfo(f64, a, "123.456")) {
+        .ok => {},
+        .err => |e| {
+            defer a.free(e.path);
+            if (e.kind == .out_of_memory) return error.OutOfMemory;
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "SONNY-2449 number parse preserves allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationNumber2449, .{});
 }
