@@ -58,7 +58,7 @@ stages:
 
 # Zig installation template (SEC-R6-02: SHA-256 verified via ziglang.org index)
 .install-zig: &install-zig
-  - apt-get update && apt-get install -y curl xz-utils python3 git
+  - apt-get -o Acquire::Retries=5 update -qq && { apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl ca-certificates xz-utils python3 git || { apt-get -o Acquire::Retries=5 update -qq && apt-get -o Acquire::Retries=5 install -y --no-install-recommends --fix-missing curl ca-certificates xz-utils python3 git; }; }
   - |
     if [ ! -f "zig-${ZIG_VERSION}/zig" ]; then
       ARCH=$(uname -m)
@@ -187,7 +187,7 @@ test:json-schema-suite:
   image: debian:bookworm-slim
   before_script:
     - *install-zig
-    - apt-get install -y git
+    - apt-get -o Acquire::Retries=5 update -qq && { apt-get -o Acquire::Retries=5 install -y --no-install-recommends git || { apt-get -o Acquire::Retries=5 update -qq && apt-get -o Acquire::Retries=5 install -y --no-install-recommends --fix-missing git; }; }
     # Fetch JSON Schema Test Suite from GitHub (external data source) at the
     # commit the script pins, so a compromised or retargeted upstream `main`
     # cannot silently change what the schema suite validates against (ASR-025).
@@ -246,7 +246,7 @@ hook-env-regression:
   image: python:3.15-slim-bookworm
   tags: [company, linux, x86]
   before_script:
-    - apt-get update -qq && apt-get install -y --no-install-recommends git
+    - apt-get -o Acquire::Retries=5 update -qq && { apt-get -o Acquire::Retries=5 install -y --no-install-recommends git || { apt-get -o Acquire::Retries=5 update -qq && apt-get -o Acquire::Retries=5 install -y --no-install-recommends --fix-missing git; }; }
   script:
     - python3 scripts/test_hook_env.py
 
