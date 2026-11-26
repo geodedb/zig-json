@@ -1,0 +1,23 @@
+179:27:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+190:27:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+200:27:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+210:27:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+220:27:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+236:27:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+150:101:2:ZL300.max_line_length:line exceeds 100 characters (106)
+62:47:2:ZL303.max_nesting:nesting depth exceeds 4 (5)
+51:9:1:ZL009.var_should_be_const:variable 'values' is never reassigned; consider using 'const'
+125:17:1:ZL009.var_should_be_const:variable 'line_end' is never reassigned; consider using 'const'
+149:17:1:ZL009.var_should_be_const:variable 'parse_err' is never reassigned; consider using 'const'
+179:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+190:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+200:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+210:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+220:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+222:9:1:ZL009.var_should_be_const:variable 'iter' is never reassigned; consider using 'const'
+223:9:1:ZL009.var_should_be_const:variable 'count' is never reassigned; consider using 'const'
+226:13:1:ZL009.var_should_be_const:variable 'd' is never reassigned; consider using 'const'
+236:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+238:9:1:ZL009.var_should_be_const:variable 'doc' is never reassigned; consider using 'const'
+195:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+109:5:1:ZL011.missing_doc_comment:public declaration 'init' is missing documentation

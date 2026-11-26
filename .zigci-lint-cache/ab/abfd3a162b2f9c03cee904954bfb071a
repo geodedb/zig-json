@@ -1,0 +1,14 @@
+32:69:2:ZL303.max_nesting:nesting depth exceeds 4 (6)
+75:9:1:ZL009.var_should_be_const:variable 'ti' is never reassigned; consider using 'const'
+76:9:1:ZL009.var_should_be_const:variable 'ki' is never reassigned; consider using 'const'
+141:9:1:ZL009.var_should_be_const:variable 'buf' is never reassigned; consider using 'const'
+173:9:1:ZL009.var_should_be_const:variable 'items' is never reassigned; consider using 'const'
+195:9:1:ZL009.var_should_be_const:variable 'inner' is never reassigned; consider using 'const'
+198:9:1:ZL009.var_should_be_const:variable 'outer' is never reassigned; consider using 'const'
+231:9:1:ZL009.var_should_be_const:variable 'combo_members' is never reassigned; consider using 'const'
+240:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+168:50:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+203:31:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+259:40:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+265:40:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+210:24:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer

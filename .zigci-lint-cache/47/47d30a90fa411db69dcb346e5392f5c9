@@ -1,0 +1,70 @@
+201:8:1:ZL200.fn_camelcase:function 'StreamingEncoder' should use camelCase
+255:8:1:ZL200.fn_camelcase:function 'UnmarshalResult' should use camelCase
+302:11:1:ZL203.const_snakecase:constant 'readValue' should use snake_case (or PascalCase for types)
+305:11:1:ZL203.const_snakecase:constant 'freeValue' should use snake_case (or PascalCase for types)
+321:11:1:ZL203.const_snakecase:constant 'readerTokenizer' should use snake_case (or PascalCase for types)
+324:11:1:ZL203.const_snakecase:constant 'readValueFromReader' should use snake_case (or PascalCase for types)
+350:11:1:ZL203.const_snakecase:constant 'formatTimestamp' should use snake_case (or PascalCase for types)
+353:11:1:ZL203.const_snakecase:constant 'parseTimestamp' should use snake_case (or PascalCase for types)
+475:11:1:ZL203.const_snakecase:constant 'freePatchValue' should use snake_case (or PascalCase for types)
+484:11:1:ZL203.const_snakecase:constant 'freeDiffOperations' should use snake_case (or PascalCase for types)
+533:11:1:ZL203.const_snakecase:constant 'freeSchema' should use snake_case (or PascalCase for types)
+559:11:1:ZL203.const_snakecase:constant 'SIMD_VECTOR_SIZE' should use snake_case (or PascalCase for types)
+571:11:1:ZL203.const_snakecase:constant 'skipWhitespaceSIMD' should use snake_case (or PascalCase for types)
+574:11:1:ZL203.const_snakecase:constant 'findStructuralSIMD' should use snake_case (or PascalCase for types)
+577:11:1:ZL203.const_snakecase:constant 'scanStringSIMD' should use snake_case (or PascalCase for types)
+580:11:1:ZL203.const_snakecase:constant 'validateUtf8SIMD' should use snake_case (or PascalCase for types)
+583:11:1:ZL203.const_snakecase:constant 'simdAvailable' should use snake_case (or PascalCase for types)
+611:11:1:ZL203.const_snakecase:constant 'parseAsync' should use snake_case (or PascalCase for types)
+620:11:1:ZL203.const_snakecase:constant 'freeAsyncValue' should use snake_case (or PascalCase for types)
+636:11:1:ZL203.const_snakecase:constant 'getLdIriType' should use snake_case (or PascalCase for types)
+714:11:1:ZL203.const_snakecase:constant 'cborFree' should use snake_case (or PascalCase for types)
+206:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+260:101:2:ZL300.max_line_length:line exceeds 100 characters (102)
+265:101:2:ZL300.max_line_length:line exceeds 100 characters (112)
+275:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+381:101:2:ZL300.max_line_length:line exceeds 100 characters (113)
+409:101:2:ZL300.max_line_length:line exceeds 100 characters (132)
+441:101:2:ZL300.max_line_length:line exceeds 100 characters (116)
+465:101:2:ZL300.max_line_length:line exceeds 100 characters (109)
+493:101:2:ZL300.max_line_length:line exceeds 100 characters (110)
+511:101:2:ZL300.max_line_length:line exceeds 100 characters (123)
+516:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+528:101:2:ZL300.max_line_length:line exceeds 100 characters (105)
+656:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+661:101:2:ZL300.max_line_length:line exceeds 100 characters (109)
+666:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+709:101:2:ZL300.max_line_length:line exceeds 100 characters (102)
+155:54:2:ZL303.max_nesting:nesting depth exceeds 4 (6)
+87:22:1:ZL010.magic_number:magic number 1_000_000; consider using a named constant
+375:28:1:ZL010.magic_number:magic number 1_000_000; consider using a named constant
+749:32:1:ZL010.magic_number:magic number 3; consider using a named constant
+749:35:1:ZL010.magic_number:magic number 4; consider using a named constant
+751:42:1:ZL010.magic_number:magic number 10; consider using a named constant
+22:1:1:ZL011.missing_doc_comment:public declaration 'parser' is missing documentation
+23:1:1:ZL011.missing_doc_comment:public declaration 'emitter' is missing documentation
+24:1:1:ZL011.missing_doc_comment:public declaration 'encode_mod' is missing documentation
+25:1:1:ZL011.missing_doc_comment:public declaration 'unmarshal_mod' is missing documentation
+26:1:1:ZL011.missing_doc_comment:public declaration 'tokenizer_mod' is missing documentation
+27:1:1:ZL011.missing_doc_comment:public declaration 'time_mod' is missing documentation
+28:1:1:ZL011.missing_doc_comment:public declaration 'unicode' is missing documentation
+29:1:1:ZL011.missing_doc_comment:public declaration 'number_mod' is missing documentation
+34:1:1:ZL011.missing_doc_comment:public declaration 'pointer_mod' is missing documentation
+35:1:1:ZL011.missing_doc_comment:public declaration 'regex' is missing documentation
+36:1:1:ZL011.missing_doc_comment:public declaration 'schema_mod' is missing documentation
+37:1:1:ZL011.missing_doc_comment:public declaration 'debug_mod' is missing documentation
+38:1:1:ZL011.missing_doc_comment:public declaration 'patch_mod' is missing documentation
+39:1:1:ZL011.missing_doc_comment:public declaration 'jsonl_mod' is missing documentation
+40:1:1:ZL011.missing_doc_comment:public declaration 'schema_gen_mod' is missing documentation
+41:1:1:ZL011.missing_doc_comment:public declaration 'jsonpath_mod' is missing documentation
+42:1:1:ZL011.missing_doc_comment:public declaration 'simd_mod' is missing documentation
+43:1:1:ZL011.missing_doc_comment:public declaration 'async_mod' is missing documentation
+44:1:1:ZL011.missing_doc_comment:public declaration 'jsonld_mod' is missing documentation
+45:1:1:ZL011.missing_doc_comment:public declaration 'cbor_mod' is missing documentation
+78:5:1:ZL011.missing_doc_comment:public declaration 'init' is missing documentation
+101:5:1:ZL011.missing_doc_comment:public declaration 'isInteger' is missing documentation
+105:5:1:ZL011.missing_doc_comment:public declaration 'compare' is missing documentation
+109:5:1:ZL011.missing_doc_comment:public declaration 'isMultipleOf' is missing documentation
+129:5:1:ZL011.missing_doc_comment:public declaration 'eql' is missing documentation
+173:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation
+403:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation

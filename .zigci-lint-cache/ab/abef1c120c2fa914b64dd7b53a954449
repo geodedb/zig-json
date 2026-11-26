@@ -1,0 +1,202 @@
+749:43:3:ZL003.no_empty_catch:empty catch block suppresses errors
+762:51:3:ZL003.no_empty_catch:empty catch block suppresses errors
+1569:79:3:ZL003.no_empty_catch:empty catch block suppresses errors
+1579:75:3:ZL003.no_empty_catch:empty catch block suppresses errors
+1824:11:1:ZL201.type_pascalcase:type 'test_format' should use PascalCase
+115:101:2:ZL300.max_line_length:line exceeds 100 characters (136)
+132:101:2:ZL300.max_line_length:line exceeds 100 characters (111)
+185:101:2:ZL300.max_line_length:line exceeds 100 characters (110)
+209:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+228:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+236:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+242:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+245:101:2:ZL300.max_line_length:line exceeds 100 characters (135)
+246:101:2:ZL300.max_line_length:line exceeds 100 characters (160)
+247:101:2:ZL300.max_line_length:line exceeds 100 characters (145)
+248:101:2:ZL300.max_line_length:line exceeds 100 characters (130)
+249:101:2:ZL300.max_line_length:line exceeds 100 characters (144)
+250:101:2:ZL300.max_line_length:line exceeds 100 characters (144)
+251:101:2:ZL300.max_line_length:line exceeds 100 characters (144)
+252:101:2:ZL300.max_line_length:line exceeds 100 characters (125)
+253:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+254:101:2:ZL300.max_line_length:line exceeds 100 characters (133)
+255:101:2:ZL300.max_line_length:line exceeds 100 characters (133)
+256:101:2:ZL300.max_line_length:line exceeds 100 characters (138)
+260:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+263:101:2:ZL300.max_line_length:line exceeds 100 characters (141)
+264:101:2:ZL300.max_line_length:line exceeds 100 characters (146)
+298:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+313:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+319:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+322:101:2:ZL300.max_line_length:line exceeds 100 characters (118)
+323:101:2:ZL300.max_line_length:line exceeds 100 characters (143)
+324:101:2:ZL300.max_line_length:line exceeds 100 characters (128)
+325:101:2:ZL300.max_line_length:line exceeds 100 characters (113)
+326:101:2:ZL300.max_line_length:line exceeds 100 characters (127)
+327:101:2:ZL300.max_line_length:line exceeds 100 characters (127)
+328:101:2:ZL300.max_line_length:line exceeds 100 characters (127)
+329:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+330:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+331:101:2:ZL300.max_line_length:line exceeds 100 characters (116)
+332:101:2:ZL300.max_line_length:line exceeds 100 characters (116)
+333:101:2:ZL300.max_line_length:line exceeds 100 characters (121)
+337:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+340:101:2:ZL300.max_line_length:line exceeds 100 characters (124)
+341:101:2:ZL300.max_line_length:line exceeds 100 characters (129)
+359:101:2:ZL300.max_line_length:line exceeds 100 characters (102)
+374:101:2:ZL300.max_line_length:line exceeds 100 characters (135)
+454:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+481:101:2:ZL300.max_line_length:line exceeds 100 characters (111)
+482:101:2:ZL300.max_line_length:line exceeds 100 characters (122)
+496:101:2:ZL300.max_line_length:line exceeds 100 characters (102)
+509:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+532:101:2:ZL300.max_line_length:line exceeds 100 characters (122)
+541:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+550:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+559:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+580:101:2:ZL300.max_line_length:line exceeds 100 characters (102)
+585:101:2:ZL300.max_line_length:line exceeds 100 characters (105)
+586:101:2:ZL300.max_line_length:line exceeds 100 characters (119)
+695:101:2:ZL300.max_line_length:line exceeds 100 characters (125)
+707:101:2:ZL300.max_line_length:line exceeds 100 characters (102)
+741:101:2:ZL300.max_line_length:line exceeds 100 characters (105)
+754:101:2:ZL300.max_line_length:line exceeds 100 characters (112)
+778:101:2:ZL300.max_line_length:line exceeds 100 characters (137)
+790:101:2:ZL300.max_line_length:line exceeds 100 characters (119)
+826:101:2:ZL300.max_line_length:line exceeds 100 characters (134)
+850:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+914:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+915:101:2:ZL300.max_line_length:line exceeds 100 characters (141)
+1005:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+1045:101:2:ZL300.max_line_length:line exceeds 100 characters (122)
+1137:101:2:ZL300.max_line_length:line exceeds 100 characters (133)
+1148:101:2:ZL300.max_line_length:line exceeds 100 characters (137)
+1160:101:2:ZL300.max_line_length:line exceeds 100 characters (110)
+1239:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+1245:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+1288:101:2:ZL300.max_line_length:line exceeds 100 characters (115)
+1315:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+1398:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+1474:101:2:ZL300.max_line_length:line exceeds 100 characters (121)
+1608:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+2340:101:2:ZL300.max_line_length:line exceeds 100 characters (121)
+374:1:2:ZL301.max_function_lines:function exceeds 80 lines (226)
+826:1:2:ZL301.max_function_lines:function exceeds 80 lines (85)
+949:1:2:ZL301.max_function_lines:function exceeds 80 lines (135)
+1137:1:2:ZL301.max_function_lines:function exceeds 80 lines (487)
+148:1:2:ZL302.max_params:function has too many parameters (11 > 6)
+213:1:2:ZL302.max_params:function has too many parameters (10 > 6)
+268:1:2:ZL302.max_params:function has too many parameters (7 > 6)
+496:42:2:ZL303.max_nesting:nesting depth exceeds 4 (9)
+131:13:1:ZL009.var_should_be_const:variable 'fetched' is never reassigned; consider using 'const'
+171:13:1:ZL009.var_should_be_const:variable 'aw' is never reassigned; consider using 'const'
+199:9:1:ZL009.var_should_be_const:variable 'parse_err' is never reassigned; consider using 'const'
+335:13:1:ZL009.var_should_be_const:variable 'it' is never reassigned; consider using 'const'
+363:9:1:ZL009.var_should_be_const:variable 'aw' is never reassigned; consider using 'const'
+451:29:1:ZL009.var_should_be_const:variable 'prefix' is never reassigned; consider using 'const'
+471:29:1:ZL009.var_should_be_const:variable 'req' is never reassigned; consider using 'const'
+479:29:1:ZL009.var_should_be_const:variable 'props' is never reassigned; consider using 'const'
+488:29:1:ZL009.var_should_be_const:variable 'patterns' is never reassigned; consider using 'const'
+515:29:1:ZL009.var_should_be_const:variable 'dep_req' is never reassigned; consider using 'const'
+518:37:1:ZL009.var_should_be_const:variable 'reqs' is never reassigned; consider using 'const'
+529:29:1:ZL009.var_should_be_const:variable 'dep_sch' is never reassigned; consider using 'const'
+538:29:1:ZL009.var_should_be_const:variable 'schemas' is never reassigned; consider using 'const'
+547:29:1:ZL009.var_should_be_const:variable 'schemas' is never reassigned; consider using 'const'
+556:29:1:ZL009.var_should_be_const:variable 'schemas' is never reassigned; consider using 'const'
+628:9:1:ZL009.var_should_be_const:variable 'exp' is never reassigned; consider using 'const'
+647:17:1:ZL009.var_should_be_const:variable 'types' is never reassigned; consider using 'const'
+652:17:1:ZL009.var_should_be_const:variable 'types' is never reassigned; consider using 'const'
+683:17:1:ZL009.var_should_be_const:variable 'hasher' is never reassigned; consider using 'const'
+791:9:1:ZL009.var_should_be_const:variable 'ctx' is never reassigned; consider using 'const'
+866:13:1:ZL009.var_should_be_const:variable 'resolved' is never reassigned; consider using 'const'
+869:13:1:ZL009.var_should_be_const:variable 'aw' is never reassigned; consider using 'const'
+970:13:1:ZL009.var_should_be_const:variable 'decoded_buf' is never reassigned; consider using 'const'
+980:17:1:ZL009.var_should_be_const:variable 'def_name_buf' is never reassigned; consider using 'const'
+1004:17:1:ZL009.var_should_be_const:variable 'prop_name_buf' is never reassigned; consider using 'const'
+1086:9:1:ZL009.var_should_be_const:variable 'out_idx' is never reassigned; consider using 'const'
+1087:9:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+1287:25:1:ZL009.var_should_be_const:variable 'msg_buf' is never reassigned; consider using 'const'
+1348:17:1:ZL009.var_should_be_const:variable 'count' is never reassigned; consider using 'const'
+1525:13:1:ZL009.var_should_be_const:variable 'valid_count' is never reassigned; consider using 'const'
+1526:13:1:ZL009.var_should_be_const:variable 'matching_props' is never reassigned; consider using 'const'
+1528:13:1:ZL009.var_should_be_const:variable 'matching_items' is never reassigned; consider using 'const'
+1577:13:1:ZL009.var_should_be_const:variable 'sub_ctx' is never reassigned; consider using 'const'
+1582:13:1:ZL009.var_should_be_const:variable 'prop_it' is never reassigned; consider using 'const'
+1586:13:1:ZL009.var_should_be_const:variable 'item_it' is never reassigned; consider using 'const'
+1640:9:1:ZL009.var_should_be_const:variable 'count' is never reassigned; consider using 'const'
+1641:9:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+1775:13:1:ZL009.var_should_be_const:variable 'd' is never reassigned; consider using 'const'
+1847:13:1:ZL009.var_should_be_const:variable 'valid_doc' is never reassigned; consider using 'const'
+1868:13:1:ZL009.var_should_be_const:variable 'invalid_doc' is never reassigned; consider using 'const'
+2205:9:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+2265:9:1:ZL009.var_should_be_const:variable 'doc' is never reassigned; consider using 'const'
+2277:9:1:ZL009.var_should_be_const:variable 'inst_doc' is never reassigned; consider using 'const'
+2297:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+2298:9:1:ZL009.var_should_be_const:variable 'schema_doc' is never reassigned; consider using 'const'
+2301:9:1:ZL009.var_should_be_const:variable 'compiled' is never reassigned; consider using 'const'
+2329:9:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+626:54:1:ZL010.magic_number:magic number 10; consider using a named constant
+633:21:1:ZL010.magic_number:magic number 10; consider using a named constant
+634:18:1:ZL010.magic_number:magic number 10; consider using a named constant
+638:42:1:ZL010.magic_number:magic number 10; consider using a named constant
+1110:18:1:ZL010.magic_number:magic number 3; consider using a named constant
+1648:27:1:ZL010.magic_number:magic number 0xE0; consider using a named constant
+1648:35:1:ZL010.magic_number:magic number 0xC0; consider using a named constant
+1651:27:1:ZL010.magic_number:magic number 0xF0; consider using a named constant
+1651:35:1:ZL010.magic_number:magic number 0xE0; consider using a named constant
+1653:18:1:ZL010.magic_number:magic number 3; consider using a named constant
+1654:27:1:ZL010.magic_number:magic number 0xF8; consider using a named constant
+1654:35:1:ZL010.magic_number:magic number 0xF0; consider using a named constant
+1656:18:1:ZL010.magic_number:magic number 4; consider using a named constant
+1684:24:1:ZL010.magic_number:magic number 10; consider using a named constant
+1691:24:1:ZL010.magic_number:magic number 36; consider using a named constant
+1955:90:1:ZL010.magic_number:magic number 4; consider using a named constant
+2182:43:1:ZL010.magic_number:magic number 3; consider using a named constant
+2183:43:1:ZL010.magic_number:magic number 5; consider using a named constant
+2311:69:1:ZL010.magic_number:magic number 4; consider using a named constant
+49:1:1:ZL011.missing_doc_comment:public declaration 'SchemaNode' is missing documentation
+115:1:1:ZL011.missing_doc_comment:public declaration 'compile' is missing documentation
+680:9:1:ZL011.missing_doc_comment:public declaration 'hash' is missing documentation
+690:9:1:ZL011.missing_doc_comment:public declaration 'eql' is missing documentation
+698:9:1:ZL011.missing_doc_comment:public declaration 'hash' is missing documentation
+702:9:1:ZL011.missing_doc_comment:public declaration 'eql' is missing documentation
+790:1:1:ZL011.missing_doc_comment:public declaration 'validate' is missing documentation
+1701:35:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+1747:38:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+1760:38:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+1906:35:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+1943:35:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+2076:35:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+2112:35:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+2296:58:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+1681:41:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1710:24:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1770:20:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1771:20:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1772:20:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1846:28:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1867:30:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1903:6:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1940:6:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1966:6:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1970:53:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1981:27:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2009:6:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2086:27:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2097:27:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2122:27:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2133:27:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2207:36:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2209:36:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2331:38:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+490:45:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2207:27:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2209:27:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2331:29:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2204:49:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+2207:36:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+2209:36:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+2331:38:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+384:23:1:ZL603.missing_defer_cleanup:resource '.create(' may not be properly cleaned up; consider using defer
+427:41:1:ZL603.missing_defer_cleanup:resource '.create(' may not be properly cleaned up; consider using defer
+490:45:1:ZL603.missing_defer_cleanup:resource '.create(' may not be properly cleaned up; consider using defer

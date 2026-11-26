@@ -1,0 +1,128 @@
+238:46:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+1241:67:2:ZL002.no_unreachable:use of 'unreachable' may hide bugs
+1241:61:2:ZL004.no_catch_unreachable:catch unreachable suppresses error handling
+405:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+626:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+663:101:2:ZL300.max_line_length:line exceeds 100 characters (113)
+719:101:2:ZL300.max_line_length:line exceeds 100 characters (145)
+907:101:2:ZL300.max_line_length:line exceeds 100 characters (109)
+1010:101:2:ZL300.max_line_length:line exceeds 100 characters (135)
+1104:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+1218:101:2:ZL300.max_line_length:line exceeds 100 characters (106)
+1268:101:2:ZL300.max_line_length:line exceeds 100 characters (135)
+1324:101:2:ZL300.max_line_length:line exceeds 100 characters (107)
+1409:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+1446:101:2:ZL300.max_line_length:line exceeds 100 characters (133)
+1472:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+1479:101:2:ZL300.max_line_length:line exceeds 100 characters (106)
+1481:101:2:ZL300.max_line_length:line exceeds 100 characters (107)
+1645:101:2:ZL300.max_line_length:line exceeds 100 characters (119)
+1652:101:2:ZL300.max_line_length:line exceeds 100 characters (120)
+1659:101:2:ZL300.max_line_length:line exceeds 100 characters (119)
+1868:101:2:ZL300.max_line_length:line exceeds 100 characters (109)
+1869:101:2:ZL300.max_line_length:line exceeds 100 characters (109)
+574:5:2:ZL301.max_function_lines:function exceeds 80 lines (118)
+719:5:2:ZL301.max_function_lines:function exceeds 80 lines (187)
+818:87:2:ZL303.max_nesting:nesting depth exceeds 4 (8)
+238:17:1:ZL009.var_should_be_const:variable 'parse_err' is never reassigned; consider using 'const'
+924:25:1:ZL009.var_should_be_const:variable 'val' is never reassigned; consider using 'const'
+1130:13:1:ZL009.var_should_be_const:variable 'node_map' is never reassigned; consider using 'const'
+1149:13:1:ZL009.var_should_be_const:variable 'graph' is never reassigned; consider using 'const'
+1152:13:1:ZL009.var_should_be_const:variable 'iter' is never reassigned; consider using 'const'
+1163:13:1:ZL009.var_should_be_const:variable 'result_members' is never reassigned; consider using 'const'
+1240:13:1:ZL009.var_should_be_const:variable 'buf' is never reassigned; consider using 'const'
+1698:9:1:ZL009.var_should_be_const:variable 'term_def' is never reassigned; consider using 'const'
+1855:9:1:ZL009.var_should_be_const:variable 'loader' is never reassigned; consider using 'const'
+1866:9:1:ZL009.var_should_be_const:variable 'ctx_a' is never reassigned; consider using 'const'
+1867:9:1:ZL009.var_should_be_const:variable 'ctx_b' is never reassigned; consider using 'const'
+1932:9:1:ZL009.var_should_be_const:variable 'ctx' is never reassigned; consider using 'const'
+1966:9:1:ZL009.var_should_be_const:variable 'empty_members' is never reassigned; consider using 'const'
+1979:9:1:ZL009.var_should_be_const:variable 'values' is never reassigned; consider using 'const'
+1993:9:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+2106:5:1:ZL009.var_should_be_const:variable 'import_ctx_members' is never reassigned; consider using 'const'
+2187:9:1:ZL009.var_should_be_const:variable 'ctx1' is never reassigned; consider using 'const'
+2266:9:1:ZL009.var_should_be_const:variable 'ctx0' is never reassigned; consider using 'const'
+2267:9:1:ZL009.var_should_be_const:variable 'ctx_arr' is never reassigned; consider using 'const'
+2283:9:1:ZL009.var_should_be_const:variable 'arena' is never reassigned; consider using 'const'
+2290:9:1:ZL009.var_should_be_const:variable 'p1' is never reassigned; consider using 'const'
+2295:9:1:ZL009.var_should_be_const:variable 'p2' is never reassigned; consider using 'const'
+2324:9:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+2392:9:1:ZL009.var_should_be_const:variable 'frame_members' is never reassigned; consider using 'const'
+2411:9:1:ZL009.var_should_be_const:variable 'import_obj' is never reassigned; consider using 'const'
+2412:9:1:ZL009.var_should_be_const:variable 'ctx_members' is never reassigned; consider using 'const'
+2415:9:1:ZL009.var_should_be_const:variable 'doc_members' is never reassigned; consider using 'const'
+2445:13:1:ZL009.var_should_be_const:variable 'failing' is never reassigned; consider using 'const'
+2452:13:1:ZL009.var_should_be_const:variable 'processor' is never reassigned; consider using 'const'
+2455:13:1:ZL009.var_should_be_const:variable 'context' is never reassigned; consider using 'const'
+2460:13:1:ZL009.var_should_be_const:variable 'def_members' is never reassigned; consider using 'const'
+2031:67:1:ZL010.magic_number:magic number 4; consider using a named constant
+2444:25:1:ZL010.magic_number:magic number 24; consider using a named constant
+23:5:1:ZL011.missing_doc_comment:public declaration 'context' is missing documentation
+24:5:1:ZL011.missing_doc_comment:public declaration 'id' is missing documentation
+25:5:1:ZL011.missing_doc_comment:public declaration 'type_kw' is missing documentation
+26:5:1:ZL011.missing_doc_comment:public declaration 'value' is missing documentation
+27:5:1:ZL011.missing_doc_comment:public declaration 'language' is missing documentation
+28:5:1:ZL011.missing_doc_comment:public declaration 'container' is missing documentation
+29:5:1:ZL011.missing_doc_comment:public declaration 'list' is missing documentation
+30:5:1:ZL011.missing_doc_comment:public declaration 'set' is missing documentation
+31:5:1:ZL011.missing_doc_comment:public declaration 'index' is missing documentation
+32:5:1:ZL011.missing_doc_comment:public declaration 'reverse' is missing documentation
+33:5:1:ZL011.missing_doc_comment:public declaration 'graph' is missing documentation
+34:5:1:ZL011.missing_doc_comment:public declaration 'vocab' is missing documentation
+35:5:1:ZL011.missing_doc_comment:public declaration 'base' is missing documentation
+36:5:1:ZL011.missing_doc_comment:public declaration 'version' is missing documentation
+37:5:1:ZL011.missing_doc_comment:public declaration 'import_kw' is missing documentation
+38:5:1:ZL011.missing_doc_comment:public declaration 'propagate' is missing documentation
+39:5:1:ZL011.missing_doc_comment:public declaration 'protected' is missing documentation
+40:5:1:ZL011.missing_doc_comment:public declaration 'direction' is missing documentation
+41:5:1:ZL011.missing_doc_comment:public declaration 'json_kw' is missing documentation
+42:5:1:ZL011.missing_doc_comment:public declaration 'none' is missing documentation
+43:5:1:ZL011.missing_doc_comment:public declaration 'included' is missing documentation
+44:5:1:ZL011.missing_doc_comment:public declaration 'nest' is missing documentation
+45:5:1:ZL011.missing_doc_comment:public declaration 'prefix' is missing documentation
+47:5:1:ZL011.missing_doc_comment:public declaration 'isKeyword' is missing documentation
+51:5:1:ZL011.missing_doc_comment:public declaration 'isValidKeyword' is missing documentation
+150:5:1:ZL011.missing_doc_comment:public declaration 'ProcessingMode' is missing documentation
+176:5:1:ZL011.missing_doc_comment:public declaration 'FetchError' is missing documentation
+191:9:1:ZL011.missing_doc_comment:public declaration 'schema_org' is missing documentation
+192:9:1:ZL011.missing_doc_comment:public declaration 'activitystreams' is missing documentation
+193:9:1:ZL011.missing_doc_comment:public declaration 'security_v1' is missing documentation
+194:9:1:ZL011.missing_doc_comment:public declaration 'did_v1' is missing documentation
+197:5:1:ZL011.missing_doc_comment:public declaration 'init' is missing documentation
+208:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation
+354:5:1:ZL011.missing_doc_comment:public declaration 'Direction' is missing documentation
+356:5:1:ZL011.missing_doc_comment:public declaration 'init' is missing documentation
+368:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation
+480:5:1:ZL011.missing_doc_comment:public declaration 'ContainerType' is missing documentation
+491:5:1:ZL011.missing_doc_comment:public declaration 'init' is missing documentation
+507:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation
+515:5:1:ZL011.missing_doc_comment:public declaration 'clone' is missing documentation
+550:5:1:ZL011.missing_doc_comment:public declaration 'init' is missing documentation
+560:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation
+90:41:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+91:34:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1471:63:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1471:79:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1472:56:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1479:60:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1481:60:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1499:68:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1515:48:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1521:64:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1522:64:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1524:64:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1995:34:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2326:38:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+1995:25:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2326:29:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+429:58:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+441:50:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+1104:62:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+1242:42:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+1562:39:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+1569:39:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+1599:39:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+1995:34:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+2326:38:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+382:43:1:ZL603.missing_defer_cleanup:resource '.create(' may not be properly cleaned up; consider using defer
+533:21:1:ZL605.large_struct_copy:struct 'Processor' has 76 fields; consider passing by pointer to avoid copies

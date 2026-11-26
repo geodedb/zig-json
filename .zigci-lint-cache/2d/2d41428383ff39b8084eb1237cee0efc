@@ -1,0 +1,65 @@
+302:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+421:101:2:ZL300.max_line_length:line exceeds 100 characters (104)
+437:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+452:101:2:ZL300.max_line_length:line exceeds 100 characters (115)
+478:101:2:ZL300.max_line_length:line exceeds 100 characters (117)
+488:101:2:ZL300.max_line_length:line exceeds 100 characters (109)
+496:101:2:ZL300.max_line_length:line exceeds 100 characters (105)
+512:101:2:ZL300.max_line_length:line exceeds 100 characters (120)
+518:101:2:ZL300.max_line_length:line exceeds 100 characters (120)
+531:101:2:ZL300.max_line_length:line exceeds 100 characters (112)
+546:101:2:ZL300.max_line_length:line exceeds 100 characters (124)
+552:101:2:ZL300.max_line_length:line exceeds 100 characters (124)
+589:101:2:ZL300.max_line_length:line exceeds 100 characters (104)
+605:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+616:101:2:ZL300.max_line_length:line exceeds 100 characters (104)
+620:101:2:ZL300.max_line_length:line exceeds 100 characters (105)
+170:5:2:ZL301.max_function_lines:function exceeds 80 lines (83)
+390:1:2:ZL301.max_function_lines:function exceeds 80 lines (174)
+626:1:2:ZL301.max_function_lines:function exceeds 80 lines (84)
+390:1:2:ZL302.max_params:function has too many parameters (8 > 6)
+566:1:2:ZL302.max_params:function has too many parameters (9 > 6)
+1096:25:2:ZL303.max_nesting:nesting depth exceeds 4 (11)
+452:74:2:ZL106.unchecked_array_access:using pointer/int cast as array index may cause out-of-bounds access
+478:78:2:ZL106.unchecked_array_access:using pointer/int cast as array index may cause out-of-bounds access
+63:9:1:ZL009.var_should_be_const:variable 'arena' is never reassigned; consider using 'const'
+66:9:1:ZL009.var_should_be_const:variable 'results' is never reassigned; consider using 'const'
+73:9:1:ZL009.var_should_be_const:variable 'visits' is never reassigned; consider using 'const'
+76:9:1:ZL009.var_should_be_const:variable 'parser' is never reassigned; consider using 'const'
+180:17:1:ZL009.var_should_be_const:variable 'depth' is never reassigned; consider using 'const'
+207:13:1:ZL009.var_should_be_const:variable 'content_end' is never reassigned; consider using 'const'
+304:13:1:ZL009.var_should_be_const:variable 'seg' is never reassigned; consider using 'const'
+307:13:1:ZL009.var_should_be_const:variable 'parts' is never reassigned; consider using 'const'
+312:13:1:ZL009.var_should_be_const:variable 'count' is never reassigned; consider using 'const'
+314:13:1:ZL009.var_should_be_const:variable 'check_parts' is never reassigned; consider using 'const'
+337:17:1:ZL009.var_should_be_const:variable 'indices' is never reassigned; consider using 'const'
+350:17:1:ZL009.var_should_be_const:variable 'names' is never reassigned; consider using 'const'
+475:25:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+651:9:1:ZL009.var_should_be_const:variable 'field_end' is never reassigned; consider using 'const'
+1040:9:1:ZL009.var_should_be_const:variable 'doc_buf' is never reassigned; consider using 'const'
+1061:9:1:ZL009.var_should_be_const:variable 'doc_buf' is never reassigned; consider using 'const'
+1122:13:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+1123:13:1:ZL009.var_should_be_const:variable 'doc' is never reassigned; consider using 'const'
+1126:13:1:ZL009.var_should_be_const:variable 'result' is never reassigned; consider using 'const'
+281:60:1:ZL010.magic_number:magic number 10; consider using a named constant
+288:58:1:ZL010.magic_number:magic number 10; consider using a named constant
+295:59:1:ZL010.magic_number:magic number 10; consider using a named constant
+325:55:1:ZL010.magic_number:magic number 10; consider using a named constant
+342:61:1:ZL010.magic_number:magic number 10; consider using a named constant
+541:57:1:ZL010.magic_number:magic number 10; consider using a named constant
+813:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+827:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+905:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+1042:47:1:ZL010.magic_number:magic number 30; consider using a named constant
+1063:47:1:ZL010.magic_number:magic number 5; consider using a named constant
+1072:44:1:ZL010.magic_number:magic number 10; consider using a named constant
+1117:48:1:ZL010.magic_number:magic number 3; consider using a named constant
+1129:48:1:ZL010.magic_number:magic number 3; consider using a named constant
+55:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation
+760:29:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+882:35:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+242:55:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+316:53:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+680:20:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+337:36:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+350:34:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer

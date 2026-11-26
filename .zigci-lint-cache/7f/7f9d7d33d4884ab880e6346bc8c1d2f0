@@ -1,0 +1,72 @@
+1481:37:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+1558:37:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+894:101:2:ZL300.max_line_length:line exceeds 100 characters (105)
+946:101:2:ZL300.max_line_length:line exceeds 100 characters (126)
+1465:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+457:5:2:ZL301.max_function_lines:function exceeds 80 lines (160)
+628:5:2:ZL301.max_function_lines:function exceeds 80 lines (409)
+1141:36:2:ZL303.max_nesting:nesting depth exceeds 4 (7)
+315:13:1:ZL009.var_should_be_const:variable 'brace_depth' is never reassigned; consider using 'const'
+316:13:1:ZL009.var_should_be_const:variable 'bracket_depth' is never reassigned; consider using 'const'
+959:13:1:ZL009.var_should_be_const:variable 'parent' is never reassigned; consider using 'const'
+1481:13:1:ZL009.var_should_be_const:variable 'perr' is never reassigned; consider using 'const'
+1558:13:1:ZL009.var_should_be_const:variable 'perr' is never reassigned; consider using 'const'
+1559:13:1:ZL009.var_should_be_const:variable 'doc' is never reassigned; consider using 'const'
+1576:13:1:ZL009.var_should_be_const:variable 'input' is never reassigned; consider using 'const'
+1594:13:1:ZL009.var_should_be_const:variable 'parser' is never reassigned; consider using 'const'
+1617:9:1:ZL009.var_should_be_const:variable 'count' is never reassigned; consider using 'const'
+1618:9:1:ZL009.var_should_be_const:variable 'sum' is never reassigned; consider using 'const'
+1671:9:1:ZL009.var_should_be_const:variable 'iter' is never reassigned; consider using 'const'
+99:29:1:ZL010.magic_number:magic number 4096; consider using a named constant
+654:24:1:ZL010.magic_number:magic number 4; consider using a named constant
+657:62:1:ZL010.magic_number:magic number 4; consider using a named constant
+660:21:1:ZL010.magic_number:magic number 4; consider using a named constant
+661:21:1:ZL010.magic_number:magic number 4; consider using a named constant
+662:35:1:ZL010.magic_number:magic number 4; consider using a named constant
+663:39:1:ZL010.magic_number:magic number 4; consider using a named constant
+669:28:1:ZL010.magic_number:magic number 4; consider using a named constant
+672:66:1:ZL010.magic_number:magic number 4; consider using a named constant
+675:25:1:ZL010.magic_number:magic number 4; consider using a named constant
+676:25:1:ZL010.magic_number:magic number 4; consider using a named constant
+677:39:1:ZL010.magic_number:magic number 4; consider using a named constant
+678:43:1:ZL010.magic_number:magic number 4; consider using a named constant
+681:28:1:ZL010.magic_number:magic number 5; consider using a named constant
+684:66:1:ZL010.magic_number:magic number 5; consider using a named constant
+687:25:1:ZL010.magic_number:magic number 5; consider using a named constant
+688:25:1:ZL010.magic_number:magic number 5; consider using a named constant
+689:39:1:ZL010.magic_number:magic number 5; consider using a named constant
+690:43:1:ZL010.magic_number:magic number 5; consider using a named constant
+738:62:1:ZL010.magic_number:magic number 0x0C; consider using a named constant
+744:40:1:ZL010.magic_number:magic number 4; consider using a named constant
+749:37:1:ZL010.magic_number:magic number 4; consider using a named constant
+750:37:1:ZL010.magic_number:magic number 4; consider using a named constant
+751:51:1:ZL010.magic_number:magic number 4; consider using a named constant
+752:55:1:ZL010.magic_number:magic number 4; consider using a named constant
+757:41:1:ZL010.magic_number:magic number 0x800; consider using a named constant
+758:72:1:ZL010.magic_number:magic number 0xC0; consider using a named constant
+758:86:1:ZL010.magic_number:magic number 6; consider using a named constant
+759:85:1:ZL010.magic_number:magic number 0x3F; consider using a named constant
+761:72:1:ZL010.magic_number:magic number 0xE0; consider using a named constant
+761:86:1:ZL010.magic_number:magic number 12; consider using a named constant
+762:87:1:ZL010.magic_number:magic number 6; consider using a named constant
+762:92:1:ZL010.magic_number:magic number 0x3F; consider using a named constant
+763:85:1:ZL010.magic_number:magic number 0x3F; consider using a named constant
+1333:67:1:ZL010.magic_number:magic number 10; consider using a named constant
+1552:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+1627:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+1628:44:1:ZL010.magic_number:magic number 6; consider using a named constant
+71:5:1:ZL011.missing_doc_comment:public declaration 'ErrorCode' is missing documentation
+1102:5:1:ZL011.missing_doc_comment:public declaration 'init' is missing documentation
+1113:5:1:ZL011.missing_doc_comment:public declaration 'deinit' is missing documentation
+1121:5:1:ZL011.missing_doc_comment:public declaration 'addInput' is missing documentation
+1241:1:1:ZL011.missing_doc_comment:public declaration 'AsyncParseError' is missing documentation
+1135:76:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1289:29:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1379:29:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1393:32:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1419:35:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1446:35:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1459:73:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1502:68:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1503:66:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1523:33:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path

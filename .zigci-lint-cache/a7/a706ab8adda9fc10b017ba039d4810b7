@@ -1,0 +1,56 @@
+114:13:2:ZL002.no_unreachable:use of 'unreachable' may hide bugs
+612:67:2:ZL002.no_unreachable:use of 'unreachable' may hide bugs
+1328:58:3:ZL003.no_empty_catch:empty catch block suppresses errors
+1341:62:3:ZL003.no_empty_catch:empty catch block suppresses errors
+612:61:2:ZL004.no_catch_unreachable:catch unreachable suppresses error handling
+120:101:2:ZL300.max_line_length:line exceeds 100 characters (104)
+135:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+138:101:2:ZL300.max_line_length:line exceeds 100 characters (134)
+146:101:2:ZL300.max_line_length:line exceeds 100 characters (126)
+148:101:2:ZL300.max_line_length:line exceeds 100 characters (124)
+185:101:2:ZL300.max_line_length:line exceeds 100 characters (140)
+208:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+210:101:2:ZL300.max_line_length:line exceeds 100 characters (126)
+235:101:2:ZL300.max_line_length:line exceeds 100 characters (118)
+246:101:2:ZL300.max_line_length:line exceeds 100 characters (134)
+250:101:2:ZL300.max_line_length:line exceeds 100 characters (126)
+255:101:2:ZL300.max_line_length:line exceeds 100 characters (130)
+425:101:2:ZL300.max_line_length:line exceeds 100 characters (407)
+482:101:2:ZL300.max_line_length:line exceeds 100 characters (135)
+533:101:2:ZL300.max_line_length:line exceeds 100 characters (139)
+572:101:2:ZL300.max_line_length:line exceeds 100 characters (142)
+815:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+880:101:2:ZL300.max_line_length:line exceeds 100 characters (117)
+918:101:2:ZL300.max_line_length:line exceeds 100 characters (123)
+936:101:2:ZL300.max_line_length:line exceeds 100 characters (121)
+954:101:2:ZL300.max_line_length:line exceeds 100 characters (121)
+976:101:2:ZL300.max_line_length:line exceeds 100 characters (125)
+977:101:2:ZL300.max_line_length:line exceeds 100 characters (121)
+987:101:2:ZL300.max_line_length:line exceeds 100 characters (125)
+988:101:2:ZL300.max_line_length:line exceeds 100 characters (121)
+1004:101:2:ZL300.max_line_length:line exceeds 100 characters (117)
+1225:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+1231:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+1332:101:2:ZL300.max_line_length:line exceeds 100 characters (110)
+1337:101:2:ZL300.max_line_length:line exceeds 100 characters (111)
+164:39:2:ZL303.max_nesting:nesting depth exceeds 4 (7)
+560:13:1:ZL009.var_should_be_const:variable 'i' is never reassigned; consider using 'const'
+574:9:1:ZL009.var_should_be_const:variable 'processed' is never reassigned; consider using 'const'
+611:9:1:ZL009.var_should_be_const:variable 'buf' is never reassigned; consider using 'const'
+623:9:1:ZL009.var_should_be_const:variable 'escaped' is never reassigned; consider using 'const'
+997:9:1:ZL009.var_should_be_const:variable 'items' is never reassigned; consider using 'const'
+1099:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+1201:9:1:ZL009.var_should_be_const:variable 'from_items' is never reassigned; consider using 'const'
+1207:9:1:ZL009.var_should_be_const:variable 'to_items' is never reassigned; consider using 'const'
+1267:9:1:ZL009.var_should_be_const:variable 'from_members' is never reassigned; consider using 'const'
+1272:9:1:ZL009.var_should_be_const:variable 'to_members' is never reassigned; consider using 'const'
+1359:13:1:ZL009.var_should_be_const:variable 'leaked' is never reassigned; consider using 'const'
+1360:13:1:ZL009.var_should_be_const:variable 'it' is never reassigned; consider using 'const'
+1376:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+1472:13:1:ZL009.var_should_be_const:variable 'guard' is never reassigned; consider using 'const'
+1477:13:1:ZL009.var_should_be_const:variable 'target_members' is never reassigned; consider using 'const'
+1483:13:1:ZL009.var_should_be_const:variable 'patch_members' is never reassigned; consider using 'const'
+1490:13:1:ZL009.var_should_be_const:variable 'failing' is never reassigned; consider using 'const'
+1010:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+1245:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+1471:25:1:ZL010.magic_number:magic number 96; consider using a named constant

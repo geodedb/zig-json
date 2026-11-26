@@ -1,0 +1,22 @@
+112:9:1:ZL009.var_should_be_const:variable 'inst_doc' is never reassigned; consider using 'const'
+163:9:1:ZL009.var_should_be_const:variable 'schema_doc' is never reassigned; consider using 'const'
+166:9:1:ZL009.var_should_be_const:variable 'compiled' is never reassigned; consider using 'const'
+171:9:1:ZL009.var_should_be_const:variable 'valid_doc' is never reassigned; consider using 'const'
+180:9:1:ZL009.var_should_be_const:variable 'invalid_doc' is never reassigned; consider using 'const'
+259:9:1:ZL009.var_should_be_const:variable 'doc' is never reassigned; consider using 'const'
+276:9:1:ZL009.var_should_be_const:variable 'int_doc' is never reassigned; consider using 'const'
+281:9:1:ZL009.var_should_be_const:variable 'whole_doc' is never reassigned; consider using 'const'
+286:9:1:ZL009.var_should_be_const:variable 'float_doc' is never reassigned; consider using 'const'
+293:9:1:ZL009.var_should_be_const:variable 'err' is never reassigned; consider using 'const'
+295:9:1:ZL009.var_should_be_const:variable 'doc1' is never reassigned; consider using 'const'
+298:9:1:ZL009.var_should_be_const:variable 'doc2' is never reassigned; consider using 'const'
+128:49:1:ZL010.magic_number:magic number 3; consider using a named constant
+170:46:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+179:48:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+40:19:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+53:19:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+66:19:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+73:40:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+155:33:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+229:42:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+239:41:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path

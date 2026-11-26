@@ -1,0 +1,19 @@
+16:9:1:ZL009.var_should_be_const:variable 'buf' is never reassigned; consider using 'const'
+27:17:1:ZL009.var_should_be_const:variable 'num_buf' is never reassigned; consider using 'const'
+65:9:1:ZL009.var_should_be_const:variable 'buf' is never reassigned; consider using 'const'
+110:49:1:ZL010.magic_number:magic number 4; consider using a named constant
+110:54:1:ZL010.magic_number:magic number 0xF; consider using a named constant
+111:47:1:ZL010.magic_number:magic number 0xF; consider using a named constant
+23:39:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+158:68:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+74:32:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+78:32:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+82:32:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+86:32:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+101:43:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+102:44:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+103:44:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+104:44:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+105:44:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+108:44:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+158:58:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path

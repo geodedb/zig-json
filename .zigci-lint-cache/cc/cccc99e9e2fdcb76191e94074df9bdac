@@ -1,0 +1,177 @@
+555:21:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+1028:21:2:ZL001.no_undefined:use of 'undefined' may hide uninitialized memory bugs
+574:50:2:ZL104.no_zeroes_struct_pointers:std.mem.zeroes creates null pointers in structs with non-nullable pointer fields; consider explicit initialization
+656:50:2:ZL104.no_zeroes_struct_pointers:std.mem.zeroes creates null pointers in structs with non-nullable pointer fields; consider explicit initialization
+917:40:2:ZL104.no_zeroes_struct_pointers:std.mem.zeroes creates null pointers in structs with non-nullable pointer fields; consider explicit initialization
+1041:50:2:ZL104.no_zeroes_struct_pointers:std.mem.zeroes creates null pointers in structs with non-nullable pointer fields; consider explicit initialization
+1110:50:2:ZL104.no_zeroes_struct_pointers:std.mem.zeroes creates null pointers in structs with non-nullable pointer fields; consider explicit initialization
+1146:36:2:ZL104.no_zeroes_struct_pointers:std.mem.zeroes creates null pointers in structs with non-nullable pointer fields; consider explicit initialization
+88:8:1:ZL200.fn_camelcase:function 'UnmarshalResult' should use camelCase
+1825:22:2:ZL204.no_dupe_import:duplicate import of 'json.zig' (first at line 16)
+1951:22:2:ZL204.no_dupe_import:duplicate import of 'json.zig' (first at line 16)
+2016:22:2:ZL204.no_dupe_import:duplicate import of 'json.zig' (first at line 16)
+96:101:2:ZL300.max_line_length:line exceeds 100 characters (175)
+122:101:2:ZL300.max_line_length:line exceeds 100 characters (102)
+136:101:2:ZL300.max_line_length:line exceeds 100 characters (132)
+141:101:2:ZL300.max_line_length:line exceeds 100 characters (112)
+158:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+171:101:2:ZL300.max_line_length:line exceeds 100 characters (125)
+210:101:2:ZL300.max_line_length:line exceeds 100 characters (127)
+214:101:2:ZL300.max_line_length:line exceeds 100 characters (110)
+278:101:2:ZL300.max_line_length:line exceeds 100 characters (107)
+309:101:2:ZL300.max_line_length:line exceeds 100 characters (153)
+315:101:2:ZL300.max_line_length:line exceeds 100 characters (144)
+323:101:2:ZL300.max_line_length:line exceeds 100 characters (129)
+330:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+333:101:2:ZL300.max_line_length:line exceeds 100 characters (137)
+341:101:2:ZL300.max_line_length:line exceeds 100 characters (143)
+348:101:2:ZL300.max_line_length:line exceeds 100 characters (156)
+350:101:2:ZL300.max_line_length:line exceeds 100 characters (127)
+367:101:2:ZL300.max_line_length:line exceeds 100 characters (143)
+369:101:2:ZL300.max_line_length:line exceeds 100 characters (109)
+370:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+375:101:2:ZL300.max_line_length:line exceeds 100 characters (142)
+378:101:2:ZL300.max_line_length:line exceeds 100 characters (123)
+389:101:2:ZL300.max_line_length:line exceeds 100 characters (141)
+393:101:2:ZL300.max_line_length:line exceeds 100 characters (119)
+400:101:2:ZL300.max_line_length:line exceeds 100 characters (104)
+411:101:2:ZL300.max_line_length:line exceeds 100 characters (119)
+414:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+431:101:2:ZL300.max_line_length:line exceeds 100 characters (138)
+438:101:2:ZL300.max_line_length:line exceeds 100 characters (135)
+441:101:2:ZL300.max_line_length:line exceeds 100 characters (125)
+448:101:2:ZL300.max_line_length:line exceeds 100 characters (134)
+451:101:2:ZL300.max_line_length:line exceeds 100 characters (124)
+460:101:2:ZL300.max_line_length:line exceeds 100 characters (133)
+464:101:2:ZL300.max_line_length:line exceeds 100 characters (111)
+485:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+493:101:2:ZL300.max_line_length:line exceeds 100 characters (134)
+498:101:2:ZL300.max_line_length:line exceeds 100 characters (146)
+504:101:2:ZL300.max_line_length:line exceeds 100 characters (141)
+508:101:2:ZL300.max_line_length:line exceeds 100 characters (137)
+515:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+520:101:2:ZL300.max_line_length:line exceeds 100 characters (129)
+527:101:2:ZL300.max_line_length:line exceeds 100 characters (129)
+614:101:2:ZL300.max_line_length:line exceeds 100 characters (116)
+674:101:2:ZL300.max_line_length:line exceeds 100 characters (112)
+748:101:2:ZL300.max_line_length:line exceeds 100 characters (107)
+919:101:2:ZL300.max_line_length:line exceeds 100 characters (107)
+947:101:2:ZL300.max_line_length:line exceeds 100 characters (107)
+976:101:2:ZL300.max_line_length:line exceeds 100 characters (118)
+1063:101:2:ZL300.max_line_length:line exceeds 100 characters (142)
+1075:101:2:ZL300.max_line_length:line exceeds 100 characters (129)
+1079:101:2:ZL300.max_line_length:line exceeds 100 characters (114)
+1097:101:2:ZL300.max_line_length:line exceeds 100 characters (111)
+1115:101:2:ZL300.max_line_length:line exceeds 100 characters (126)
+1148:101:2:ZL300.max_line_length:line exceeds 100 characters (117)
+1151:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+1175:101:2:ZL300.max_line_length:line exceeds 100 characters (144)
+1183:101:2:ZL300.max_line_length:line exceeds 100 characters (125)
+1187:101:2:ZL300.max_line_length:line exceeds 100 characters (110)
+1211:101:2:ZL300.max_line_length:line exceeds 100 characters (123)
+1214:101:2:ZL300.max_line_length:line exceeds 100 characters (131)
+1225:101:2:ZL300.max_line_length:line exceeds 100 characters (129)
+1229:101:2:ZL300.max_line_length:line exceeds 100 characters (116)
+1238:101:2:ZL300.max_line_length:line exceeds 100 characters (120)
+1336:101:2:ZL300.max_line_length:line exceeds 100 characters (120)
+1368:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+1562:101:2:ZL300.max_line_length:line exceeds 100 characters (111)
+1578:101:2:ZL300.max_line_length:line exceeds 100 characters (110)
+1619:101:2:ZL300.max_line_length:line exceeds 100 characters (105)
+1629:101:2:ZL300.max_line_length:line exceeds 100 characters (101)
+1646:101:2:ZL300.max_line_length:line exceeds 100 characters (104)
+1729:101:2:ZL300.max_line_length:line exceeds 100 characters (116)
+2027:101:2:ZL300.max_line_length:line exceeds 100 characters (106)
+2035:101:2:ZL300.max_line_length:line exceeds 100 characters (117)
+2156:101:2:ZL300.max_line_length:line exceeds 100 characters (112)
+2167:101:2:ZL300.max_line_length:line exceeds 100 characters (118)
+2242:101:2:ZL300.max_line_length:line exceeds 100 characters (120)
+171:1:2:ZL301.max_function_lines:function exceeds 80 lines (136)
+309:1:2:ZL301.max_function_lines:function exceeds 80 lines (226)
+548:1:2:ZL301.max_function_lines:function exceeds 80 lines (141)
+1020:1:2:ZL301.max_function_lines:function exceeds 80 lines (102)
+1020:1:2:ZL302.max_params:function has too many parameters (7 > 6)
+1131:1:2:ZL302.max_params:function has too many parameters (7 > 6)
+1158:1:2:ZL302.max_params:function has too many parameters (7 > 6)
+1202:1:2:ZL302.max_params:function has too many parameters (7 > 6)
+402:45:2:ZL303.max_nesting:nesting depth exceeds 4 (10)
+561:9:1:ZL009.var_should_be_const:variable 'fields_owned' is never reassigned; consider using 'const'
+589:9:1:ZL009.var_should_be_const:variable 'unknown_list' is never reassigned; consider using 'const'
+754:21:1:ZL009.var_should_be_const:variable 'map' is never reassigned; consider using 'const'
+1029:9:1:ZL009.var_should_be_const:variable 'fields_found' is never reassigned; consider using 'const'
+1033:9:1:ZL009.var_should_be_const:variable 'fields_owned' is never reassigned; consider using 'const'
+1326:17:1:ZL009.var_should_be_const:variable 'len' is never reassigned; consider using 'const'
+1333:17:1:ZL009.var_should_be_const:variable 'bits' is never reassigned; consider using 'const'
+1334:17:1:ZL009.var_should_be_const:variable 'out_idx' is never reassigned; consider using 'const'
+1602:9:1:ZL009.var_should_be_const:variable 'o' is never reassigned; consider using 'const'
+2120:9:1:ZL009.var_should_be_const:variable 'doc' is never reassigned; consider using 'const'
+2127:13:1:ZL009.var_should_be_const:variable 'it' is never reassigned; consider using 'const'
+2132:13:1:ZL009.var_should_be_const:variable 'extra_copy' is never reassigned; consider using 'const'
+2294:9:1:ZL009.var_should_be_const:variable 'spines' is never reassigned; consider using 'const'
+2300:9:1:ZL009.var_should_be_const:variable 'd' is never reassigned; consider using 'const'
+2309:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+1318:35:1:ZL010.magic_number:magic number 4; consider using a named constant
+1337:31:1:ZL010.magic_number:magic number 5; consider using a named constant
+1338:25:1:ZL010.magic_number:magic number 5; consider using a named constant
+1353:49:1:ZL010.magic_number:magic number 10; consider using a named constant
+1354:49:1:ZL010.magic_number:magic number 10; consider using a named constant
+1455:42:1:ZL010.magic_number:magic number 42; consider using a named constant
+1458:43:1:ZL010.magic_number:magic number 123; consider using a named constant
+1477:43:1:ZL010.magic_number:magic number 42; consider using a named constant
+1486:44:1:ZL010.magic_number:magic number 3; consider using a named constant
+1489:42:1:ZL010.magic_number:magic number 3; consider using a named constant
+1496:42:1:ZL010.magic_number:magic number 3; consider using a named constant
+1502:42:1:ZL010.magic_number:magic number 10; consider using a named constant
+1503:42:1:ZL010.magic_number:magic number 20; consider using a named constant
+1527:42:1:ZL010.magic_number:magic number 30; consider using a named constant
+1581:42:1:ZL010.magic_number:magic number 42; consider using a named constant
+1691:57:1:ZL010.magic_number:magic number 42; consider using a named constant
+1741:51:1:ZL010.magic_number:magic number 0xDE; consider using a named constant
+1741:57:1:ZL010.magic_number:magic number 0xAD; consider using a named constant
+1741:63:1:ZL010.magic_number:magic number 0xBE; consider using a named constant
+1741:69:1:ZL010.magic_number:magic number 0xEF; consider using a named constant
+1782:42:1:ZL010.magic_number:magic number 123; consider using a named constant
+1783:42:1:ZL010.magic_number:magic number 456; consider using a named constant
+1810:42:1:ZL010.magic_number:magic number 42; consider using a named constant
+1843:24:1:ZL010.magic_number:magic number 10; consider using a named constant
+1843:33:1:ZL010.magic_number:magic number 20; consider using a named constant
+1858:42:1:ZL010.magic_number:magic number 10; consider using a named constant
+1859:42:1:ZL010.magic_number:magic number 20; consider using a named constant
+2371:57:1:ZL010.magic_number:magic number 5; consider using a named constant
+1556:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1613:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1767:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1795:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1836:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1868:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1914:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1957:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+2082:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+2110:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+2182:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+2286:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
+1983:66:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+1984:65:2:ZL500.os_specific_code:Windows-specific code ':\' may cause portability issues; consider adding OS detection guards
+64:56:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1470:64:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1533:59:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1585:68:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1651:48:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1659:69:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1720:17:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1729:40:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1851:57:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1852:57:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1983:57:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1984:57:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+1985:57:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2209:67:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2231:68:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2268:48:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2362:59:1:ZL501.hardcoded_path_separator:hardcoded path may not work across operating systems; consider using std.fs.path
+2302:36:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+2302:27:1:ZL602.unnecessary_alloc:allocation inside loop; consider preallocating or using arena allocator
+214:47:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+377:47:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+864:40:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer
+2302:36:1:ZL603.missing_defer_cleanup:resource '.alloc(' may not be properly cleaned up; consider using defer

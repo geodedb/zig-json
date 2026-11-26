@@ -1,0 +1,25 @@
+323:59:2:ZL002.no_unreachable:use of 'unreachable' may hide bugs
+336:59:2:ZL002.no_unreachable:use of 'unreachable' may hide bugs
+323:53:2:ZL004.no_catch_unreachable:catch unreachable suppresses error handling
+336:53:2:ZL004.no_catch_unreachable:catch unreachable suppresses error handling
+441:17:1:ZL202.var_snakecase:variable 'found_userName' should use snake_case
+88:101:2:ZL300.max_line_length:line exceeds 100 characters (103)
+102:101:2:ZL300.max_line_length:line exceeds 100 characters (108)
+49:23:2:ZL303.max_nesting:nesting depth exceeds 4 (5)
+37:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+103:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+133:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+137:9:1:ZL009.var_should_be_const:variable 'options' is never reassigned; consider using 'const'
+154:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+163:9:1:ZL009.var_should_be_const:variable 'props' is never reassigned; consider using 'const'
+166:9:1:ZL009.var_should_be_const:variable 'required' is never reassigned; consider using 'const'
+216:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+224:9:1:ZL009.var_should_be_const:variable 'enum_values' is never reassigned; consider using 'const'
+244:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+247:9:1:ZL009.var_should_be_const:variable 'options' is never reassigned; consider using 'const'
+264:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+284:9:1:ZL009.var_should_be_const:variable 'members' is never reassigned; consider using 'const'
+322:9:1:ZL009.var_should_be_const:variable 'buf' is never reassigned; consider using 'const'
+335:9:1:ZL009.var_should_be_const:variable 'buf' is never reassigned; consider using 'const'
+414:52:1:ZL010.magic_number:magic number 3; consider using a named constant
+428:9:1:ZL011.missing_doc_comment:public declaration 'json_config' is missing documentation
